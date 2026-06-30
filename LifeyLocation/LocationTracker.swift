@@ -13,18 +13,32 @@ final class LocationTracker: NSObject, ObservableObject {
 
     private let manager = CLLocationManager()
     private let queue = SampleQueue.shared
+    private var managerConfigured = false
 
     private override init() {
         authorization = manager.authorizationStatus
         super.init()
+        lastSample = queue.samples.last
+    }
+
+    private func configureManagerIfNeeded() {
+        guard !managerConfigured else { return }
         manager.delegate = self
         manager.activityType = .otherNavigation
         manager.desiredAccuracy = kCLLocationAccuracyHundredMeters
         manager.distanceFilter = 50
         manager.pausesLocationUpdatesAutomatically = true
         manager.allowsBackgroundLocationUpdates = true
-        lastSample = queue.samples.last
-        if isTracking { beginUpdates() }
+        managerConfigured = true
+    }
+
+    func resumeAfterLaunch() {
+        if isTracking {
+            configureManagerIfNeeded()
+            if authorization == .notDetermined { manager.requestAlwaysAuthorization() }
+            else { beginUpdates() }
+        }
+        Task { await flush() }
     }
 
     func saveConnection() {
@@ -35,6 +49,7 @@ final class LocationTracker: NSObject, ObservableObject {
     func setTracking(_ enabled: Bool) {
         isTracking = enabled
         UserDefaults.standard.set(enabled, forKey: "trackingEnabled")
+        configureManagerIfNeeded()
         guard enabled else {
             manager.stopUpdatingLocation()
             manager.stopMonitoringSignificantLocationChanges()
@@ -44,10 +59,13 @@ final class LocationTracker: NSObject, ObservableObject {
         else { beginUpdates() }
     }
 
-    func requestLocationNow() { manager.requestLocation() }
+    func requestLocationNow() {
+        configureManagerIfNeeded()
+        manager.requestLocation()
+    }
 
     private func beginUpdates() {
-        guard CLLocationManager.locationServicesEnabled() else { return }
+        configureManagerIfNeeded()
         manager.startMonitoringSignificantLocationChanges()
         manager.startUpdatingLocation()
     }
@@ -62,7 +80,9 @@ final class LocationTracker: NSObject, ObservableObject {
         let batch = Array(queue.samples.prefix(250))
         guard !batch.isEmpty else { return }
         struct Payload: Encodable { let samples: [LocationSample] }
-        guard let body = try? JSONEncoder().encode(Payload(samples: batch)) else { return }
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        guard let body = try? encoder.encode(Payload(samples: batch)) else { return }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")

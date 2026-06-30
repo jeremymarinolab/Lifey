@@ -150,6 +150,35 @@ def mobile_location_samples() -> list[dict]:
         return []
 
 
+def mobile_positions(start: dt.datetime, end: dt.datetime) -> list[dict]:
+    """Convert phone-originated samples into the same shape used by Traccar."""
+    positions = []
+    for sample in mobile_location_samples():
+        stamp = parse_stamp(sample.get("capturedAt"))
+        if not stamp or not start <= stamp.astimezone() < end:
+            continue
+        positions.append({
+            "latitude": sample.get("latitude"),
+            "longitude": sample.get("longitude"),
+            "fixTime": stamp.astimezone().isoformat(),
+            "deviceTime": stamp.astimezone().isoformat(),
+            "accuracy": sample.get("accuracyMeters"),
+            "source": "Lifey Location",
+        })
+    return positions
+
+
+def location_positions(start: dt.datetime, end: dt.datetime) -> tuple[list[dict], str]:
+    """Prefer Lifey Location samples, then fall back to a configured Traccar device."""
+    phone_positions = mobile_positions(start, end)
+    if phone_positions:
+        return phone_positions, "Lifey Location"
+    settings = config()
+    if settings.get("traccarServer") and settings.get("traccarToken") and settings.get("traccarDeviceId"):
+        return traccar_positions(start, end), "Traccar"
+    return [], "Lifey Location"
+
+
 def save_mobile_location_samples(samples: list[dict]) -> None:
     MOBILE_LOCATIONS.parent.mkdir(parents=True, exist_ok=True)
     MOBILE_LOCATIONS.write_text(json.dumps(samples, indent=2))
@@ -173,10 +202,10 @@ def add_mobile_location_samples(samples: list[dict]) -> tuple[int, int]:
         try:
             sample_id = str(sample["id"]).strip()
             latitude, longitude = float(sample["latitude"]), float(sample["longitude"])
-            captured_at = dt.datetime.fromisoformat(str(sample["capturedAt"]).replace("Z", "+00:00"))
+            captured_at = parse_stamp(sample.get("capturedAt"))
         except (KeyError, TypeError, ValueError):
             continue
-        if not sample_id or sample_id in known or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        if not captured_at or not sample_id or sample_id in known or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
             continue
         existing.append({
             "id": sample_id[:100], "latitude": latitude, "longitude": longitude,
@@ -355,7 +384,7 @@ def consolidate_place_visits(visits: list[dict]) -> list[dict]:
     return groups
 
 
-def traccar_places(positions: list[dict]) -> list[dict]:
+def traccar_places(positions: list[dict], source_label: str = "Traccar") -> list[dict]:
     positions.sort(key=lambda item: item.get("fixTime", "")); places = []
     radius = grouping_radius()
     for point in positions:
@@ -366,7 +395,7 @@ def traccar_places(positions: list[dict]) -> list[dict]:
         # from the original point even while the phone never left the place.
         near_previous = places and distance_meters(places[-1]["_lastLatitude"], places[-1]["_lastLongitude"], latitude, longitude) <= radius
         if not near_previous:
-            places.append({"name": label, "label": label, "latitude": latitude, "longitude": longitude, "_lastLatitude": latitude, "_lastLongitude": longitude, "arrival": stamp, "departure": stamp, "source": "Traccar", "points": [{"latitude": latitude, "longitude": longitude, "timestamp": stamp}]})
+            places.append({"name": label, "label": label, "latitude": latitude, "longitude": longitude, "_lastLatitude": latitude, "_lastLongitude": longitude, "arrival": stamp, "departure": stamp, "source": source_label, "points": [{"latitude": latitude, "longitude": longitude, "timestamp": stamp}]})
         else:
             places[-1]["departure"] = stamp
             places[-1]["_lastLatitude"], places[-1]["_lastLongitude"] = latitude, longitude
@@ -376,14 +405,14 @@ def traccar_places(positions: list[dict]) -> list[dict]:
         merge = manual_merge_for(place["latitude"], place["longitude"])
         if merge:
             place["name"] = merge["name"]
-            place["source"] = "Merged · Traccar"
+            place["source"] = f"Merged · {source_label}"
             place["merged"] = True
             place["mergeId"] = merge["id"]
             continue
         local_label = local_place_label(place["latitude"], place["longitude"])
         if local_label:
             place["name"] = local_label["name"]
-            place["source"] = "Local label · Traccar"
+            place["source"] = f"Local label · {source_label}"
             place["labelDistance"] = local_label["distance"]
             continue
         osm_cache_key = f"osm:{place['latitude']:.3f},{place['longitude']:.3f}"
@@ -391,11 +420,11 @@ def traccar_places(positions: list[dict]) -> list[dict]:
         was_cached = osm_cache_key in settings.get("placeCache", {})
         use_osm = settings.get("osmPlacesEnabled") and (was_cached or osm_budget > 0)
         if settings.get("googlePlacesKey"):
-            enriched, source = google_place(place["latitude"], place["longitude"]), "Google Places · Traccar"
+            enriched, source = google_place(place["latitude"], place["longitude"]), f"Google Places · {source_label}"
         elif use_osm:
-            enriched, source = osm_place(place["latitude"], place["longitude"]), "OpenStreetMap · Traccar"
+            enriched, source = osm_place(place["latitude"], place["longitude"]), f"OpenStreetMap · {source_label}"
         else:
-            enriched, source = None, "Traccar"
+            enriched, source = None, source_label
         if use_osm and not settings.get("googlePlacesKey") and not was_cached: osm_budget -= 1
         if enriched: place["name"] = enriched["name"]; place["address"] = enriched.get("address"); place["source"] = source
     return consolidate_place_visits(places)
@@ -404,8 +433,16 @@ def traccar_places(positions: list[dict]) -> list[dict]:
 def parse_stamp(value: str | None) -> dt.datetime | None:
     if not value:
         return None
+    if isinstance(value, (int, float)):
+        # Swift Date's default Codable form is seconds since 2001-01-01.
+        # Accept Unix seconds too so older queued batches are not lost.
+        base = 978_307_200 if value < 1_200_000_000 else 0
+        try:
+            return dt.datetime.fromtimestamp(value + base, tz=dt.timezone.utc)
+        except (OSError, OverflowError, ValueError):
+            return None
     try:
-        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
     except ValueError:
         return None
 
@@ -484,9 +521,12 @@ def top_places(places: list[dict], limit: int = 10) -> list[dict]:
     return [{key: value for key, value in item.items() if key not in {"key", "latitude", "longitude"}} for item in sorted(totals, key=lambda item: (item["seconds"], item["visits"]), reverse=True)[:limit]]
 
 
-def week_location_data() -> dict:
+def week_location_data(source_mode: str = "auto") -> dict:
     start, end = period_bounds("week")
-    positions = traccar_positions(start, end)
+    if source_mode == "traccar":
+        positions, source = traccar_positions(start, end), "Traccar"
+    else:
+        positions, source = location_positions(start, end)
     by_day: dict[str, list[dict]] = {}
     for point in positions:
         stamp = parse_stamp(point.get("fixTime") or point.get("deviceTime"))
@@ -496,10 +536,10 @@ def week_location_data() -> dict:
     all_places: list[dict] = []
     for offset in range(7):
         day = (start.date() + dt.timedelta(days=offset)).isoformat()
-        places = traccar_places(by_day.get(day, []))
+        places = traccar_places(by_day.get(day, []), source)
         all_places.extend(places)
         days.append({"date": day, "places": places})
-    return {"start": start.date().isoformat(), "end": end.date().isoformat(), "days": days, "topPlaces": top_places(all_places), "positions": len(positions)}
+    return {"start": start.date().isoformat(), "end": end.date().isoformat(), "days": days, "topPlaces": top_places(all_places), "positions": len(positions), "source": source}
 
 
 def notion_data_source(settings: dict) -> str:
@@ -754,8 +794,8 @@ def undo_place_merge(merge_id: str) -> dict:
 
 def write_location_archive(period: str) -> dict:
     start, end = period_bounds(period)
-    positions = traccar_positions(start, end)
-    places = traccar_places(positions)
+    positions, source = location_positions(start, end)
+    places = traccar_places(positions, source)
     daily_places = ""
     if period == "weekly":
         by_day: dict[str, list[dict]] = {}
@@ -766,7 +806,7 @@ def write_location_archive(period: str) -> dict:
         daily_sections = []
         for offset in range(7):
             date = start.date() + dt.timedelta(days=offset)
-            visits = traccar_places(by_day.get(date.isoformat(), []))
+            visits = traccar_places(by_day.get(date.isoformat(), []), source)
             rows = "\n".join(f"- {wiki_place(visit['name'])} — {human_duration(place_duration_seconds(visit))}" for visit in visits) or "- No places recorded"
             daily_sections.append(f"### {date.strftime('%A, %B')} {date.day}\n{rows}")
         daily_places = "\n\n".join(daily_sections)
@@ -782,7 +822,7 @@ def write_location_archive(period: str) -> dict:
         place_path = root / f"{note_safe_name(place_title)}.md"
         write_generated_note(place_path, place_title, place_generated)
         place_notes.append(place_path.name)
-    return {"path": str(note), "backup": str(backup) if backup else None, "placeNotes": place_notes, "positions": len(positions)}
+    return {"path": str(note), "backup": str(backup) if backup else None, "placeNotes": place_notes, "positions": len(positions), "source": source}
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -835,13 +875,23 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/traccar/today":
             try:
                 start, end = period_bounds("today"); positions = traccar_positions(start, end)
-                return self.json({"places": traccar_places(positions), "positions": len(positions), "osmError": config().get("osmLastError", "")})
+                return self.json({"places": traccar_places(positions, "Traccar"), "positions": len(positions), "source": "Traccar", "osmError": config().get("osmLastError", "")})
             except (KeyError, ValueError) as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/traccar/week":
             try:
-                data = week_location_data(); data["osmError"] = config().get("osmLastError", "")
+                data = week_location_data("traccar"); data["osmError"] = config().get("osmLastError", "")
                 return self.json(data)
             except (KeyError, ValueError) as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/location/today":
+            try:
+                start, end = period_bounds("today"); positions, source = location_positions(start, end)
+                return self.json({"places": traccar_places(positions, source), "positions": len(positions), "source": source, "osmError": config().get("osmLastError", "")})
+            except ValueError as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/location/week":
+            try:
+                data = week_location_data(); data["osmError"] = config().get("osmLastError", "")
+                return self.json(data)
+            except ValueError as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/activity/youtube/today":
             return self.json(youtube_today())
         if path == "/api/obsidian/daily":

@@ -30,6 +30,7 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Lifey Location")
+            .onAppear { tracker.resumeAfterLaunch() }
             .toolbar {
                 Button { showSettings = true } label: {
                     Label("Settings", systemImage: "gear")

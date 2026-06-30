@@ -8,7 +8,6 @@ struct LifeyLocationApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(tracker)
-                .task { await tracker.flush() }
         }
     }
 }

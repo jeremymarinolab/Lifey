@@ -23,7 +23,11 @@ outputs/
 # Xcode local user state
 *.xcuserstate
 *.xcuserdata/
+xcuserdata/
 DerivedData/
+derived_data/
+derived-data/
+*.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings
 
 # Local env/secrets if added later
 .env
