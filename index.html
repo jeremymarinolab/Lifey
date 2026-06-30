@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>Lifey</title>
+    <meta name="theme-color" content="#2F383E" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Lifey" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="./lifey-icon.svg" />
+    <link rel="shortcut icon" href="./lifey-icon.svg" />
+    <link rel="apple-touch-icon" href="./lifey-icon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:opsz,wght@9..40,400;9..40,500;9..40,600;9..40,700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./mobile.css" />
+    <link rel="stylesheet" href="./preferences.css" />
+    <link rel="stylesheet" href="./preferences-extra.css" />
+    <link rel="stylesheet" href="./capture.css" />
+    <link rel="stylesheet" href="./capture-calendar.css" />
+    <link rel="stylesheet" href="./capture-override.css" />
+    <link rel="stylesheet" href="./card-layout.css" />
+  </head>
+  <body>
+    <main id="app"></main>
+    <div id="toast" role="status"></div>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

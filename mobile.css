@@ -1,0 +1,19 @@
+@media (max-width:620px){
+  body{padding-bottom:env(safe-area-inset-bottom)}
+  nav{position:sticky;top:0;z-index:10;margin:0 -17px;padding:0 17px;background:rgba(47,56,62,.82);backdrop-filter:blur(18px);-webkit-backdrop-filter:blur(18px)}
+  .nav-actions .button{white-space:nowrap}
+  .panel{border-radius:14px}
+  .panel header{padding:17px 16px 13px}
+  .task,.suggestion-list article{padding-left:16px;padding-right:16px}
+  .timeline,.place-list{padding-left:16px;padding-right:16px}
+  .hero{padding-top:34px}
+  .date-title{letter-spacing:-.05em}
+  .stats{margin-left:-1px;margin-right:-1px}
+  .stat{min-width:0}
+  .stat strong{font-size:19px}
+}
+
+@media (display-mode:standalone){
+  body{padding-top:env(safe-area-inset-top)}
+  nav{height:64px}
+}

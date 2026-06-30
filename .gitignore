@@ -1,0 +1,31 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node / package managers
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local app/generated data
+outputs/
+.activity-log.json
+.local-dashboard.json
+*.log
+*.tmp
+
+# Xcode local user state
+*.xcuserstate
+*.xcuserdata/
+DerivedData/
+
+# Local env/secrets if added later
+.env
+.env.*
+!.env.example

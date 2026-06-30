@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180">
+  <rect width="180" height="180" rx="42" fill="#2F383E"/>
+  <rect x="20" y="20" width="140" height="140" rx="34" fill="#547067" fill-opacity=".52" stroke="#cbe0d5" stroke-opacity=".38"/>
+  <text x="90" y="114" text-anchor="middle" fill="#ffffff" font-size="76" font-weight="700" font-family="Georgia,serif">L.</text>
+  <circle cx="137" cy="48" r="8" fill="#ff6e55"/>
+</svg>

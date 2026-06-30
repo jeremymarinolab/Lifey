@@ -1,0 +1,6 @@
+{
+  "name": "today-command-center",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": { "start": "python3 local_server.py" }
+}

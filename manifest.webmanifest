@@ -1,0 +1,12 @@
+{
+  "name": "Lifey",
+  "short_name": "Lifey",
+  "description": "Your local-first daily command center.",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#2F383E",
+  "theme_color": "#2F383E",
+  "icons": [
+    { "src": "./lifey-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}
