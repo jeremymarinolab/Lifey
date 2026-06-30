@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+			<key>Title</key>
+			<string>Lifey Location</string>
+			<key>FooterText</key>
+			<string>Use this page to confirm what Lifey Location can ask iOS for. The actual permission switches are managed by iOS on the app's Settings page.</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+			<key>Title</key>
+			<string>Location</string>
+			<key>Key</key>
+			<string>lifey_permission_location</string>
+			<key>DefaultValue</key>
+			<string>While Using or Always</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+			<key>Title</key>
+			<string>Precise Location</string>
+			<key>Key</key>
+			<string>lifey_permission_precise_location</string>
+			<key>DefaultValue</key>
+			<string>Used when enabled by iOS</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+			<key>Title</key>
+			<string>Background Location</string>
+			<key>Key</key>
+			<string>lifey_permission_background_location</string>
+			<key>DefaultValue</key>
+			<string>Declared for tracking</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTitleValueSpecifier</string>
+			<key>Title</key>
+			<string>Network</string>
+			<key>Key</key>
+			<string>lifey_permission_network</string>
+			<key>DefaultValue</key>
+			<string>Sends queued points to your Lifey server</string>
+		</dict>
+	</array>
+	<key>StringsTable</key>
+	<string>Root</string>
+</dict>
+</plist>

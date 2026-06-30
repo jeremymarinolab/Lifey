@@ -1,5 +1,6 @@
 import CoreLocation
 import SwiftUI
+import UIKit
 
 struct ContentView: View {
     @EnvironmentObject private var tracker: LocationTracker
@@ -11,8 +12,20 @@ struct ContentView: View {
                 Section("Tracking") {
                     Toggle("Automatic location tracking", isOn: Binding(get: { tracker.isTracking }, set: tracker.setTracking))
                     LabeledContent("Permission", value: permissionText)
-                    LabeledContent("Pending points", value: "\(SampleQueue.shared.samples.count)")
+                    LabeledContent("Accuracy", value: accuracyText)
+                    LabeledContent("Location fix", value: tracker.lastLocationDetail)
+                    LabeledContent("Pending points", value: "\(tracker.pendingCount)")
                     LabeledContent("Sync", value: tracker.lastSyncMessage)
+                }
+                Section("iPhone permission controls") {
+                    Button {
+                        openAppSettings()
+                    } label: {
+                        Label("Open Lifey in iPhone Settings", systemImage: "gearshape")
+                    }
+                    Text("If Lifey does not appear in Settings immediately, reinstall this build once. The included Settings bundle makes iOS create a dedicated Lifey Location page.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
                 }
                 Section("Latest location") {
                     if let sample = tracker.lastSample {
@@ -25,8 +38,38 @@ struct ContentView: View {
                     }
                 }
                 Section {
-                    Button("Capture and sync now") { tracker.requestLocationNow() }
-                    Button("Retry queued points") { Task { await tracker.flush() } }
+                    Button { tracker.captureAndSyncNow() } label: {
+                        if tracker.isCapturing {
+                            HStack {
+                                ProgressView()
+                                Text("Capturing location...")
+                            }
+                        } else if tracker.isSyncing {
+                            HStack {
+                                ProgressView()
+                                Text("Syncing...")
+                            }
+                        } else {
+                            Label("Capture and sync now", systemImage: "location")
+                        }
+                    }
+                    .disabled(tracker.isCapturing || tracker.isSyncing)
+                    if tracker.isCapturing {
+                        Button("Cancel capture", role: .cancel) {
+                            tracker.cancelCurrentAction()
+                        }
+                    }
+                    Button { Task { await tracker.flush() } } label: {
+                        if tracker.isSyncing {
+                            HStack {
+                                ProgressView()
+                                Text("Syncing queued points...")
+                            }
+                        } else {
+                            Label("Retry queued points", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(tracker.isSyncing)
                 }
             }
             .navigationTitle("Lifey Location")
@@ -47,6 +90,19 @@ struct ContentView: View {
         case .denied, .restricted: return "Blocked"
         default: return "Not requested"
         }
+    }
+
+    private var accuracyText: String {
+        switch tracker.accuracyAuthorization {
+        case .fullAccuracy: return "Precise"
+        case .reducedAccuracy: return "Reduced"
+        @unknown default: return "Unknown"
+        }
+    }
+
+    private func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
     }
 }
 

@@ -29,11 +29,20 @@
 	<string>Lifey records location changes while the app is in the background so your daily archive remains complete.</string>
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string>Lifey uses your location to build your private daily place history.</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Lifey connects to your Mac on your private network to sync captured location points.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>location</string>
 	</array>
 	<key>UILaunchScreen</key>
-	<dict/>
+	<dict>
+		<key>UIColorName</key>
+		<string>LaunchBackground</string>
+		<key>UIImageName</key>
+		<string>LaunchLogo</string>
+		<key>UIImageRespectsSafeAreaInsets</key>
+		<true/>
+	</dict>
 </dict>
 </plist>
