@@ -1,3 +1,17 @@
+import { actionPayload, actionTarget } from './js/actions.js';
+import { localRequest } from './js/api.js';
+import { CAPTURE_PRIORITIES, CAPTURE_RECURRENCES, captureDayTimeLabel, capturePriorityLabel, captureRecurringLabel, parseNaturalTask, taskCaptureValues } from './js/features/capture/capture.js';
+import { handleCaptureAction, handleCaptureInput, handleCaptureKeydown } from './js/features/capture/controller.js';
+import { DEFAULT_HABIT_SETTINGS, habitPeriod as habitPeriodForSettings, habitPeriodLabel as habitPeriodLabelForSettings, habitPeriodMeta as habitPeriodMetaForSettings, habitPeriods as habitPeriodsForSettings, habitStreak as habitStreakForState, isMissedHabit as isMissedHabitForState, timeToMinutes, zonedParts as zonedPartsForSettings } from './js/features/habits/habits.js';
+import { handleLocationAction } from './js/features/location/controller.js';
+import { clockTime, durationLabel, placeDurationMilliseconds, placeTiming, totalTimeLabel } from './js/features/location/location.js';
+import { handlePreferenceAction, handlePreferenceChange, handlePreferenceInput } from './js/features/preferences/controller.js';
+import { handleProjectAction } from './js/features/projects/controller.js';
+import { spotifyArtwork, spotifyStats, spotifyTrackFromItem } from './js/integrations/spotify.js';
+import { parseTasks } from './js/parsers.js';
+import { badge, escape, stat } from './js/renderers.js';
+import { loadStoredState, saveStoredState } from './js/state.js';
+
 function todayIso() { return new Date().toLocaleDateString('en-CA'); }
 function todayJournalDate() { return new Intl.DateTimeFormat('en-US', { month: 'long', day: 'numeric', year: 'numeric' }).format(new Date()); }
 function todayJournalDatePadded() { return new Intl.DateTimeFormat('en-US', { month: 'long', day: '2-digit', year: 'numeric' }).format(new Date()); }
@@ -15,14 +29,6 @@ const DEFAULT_LOCATION_ARCHIVE_TEMPLATES = {
   yearly: '---\n## Lifey · {{period}}\n\n### Top places\n{{topPlaces}}\n---'
 };
 const DEFAULT_ARCHIVE_TITLES = { daily: 'Lifey · MMMM DD, YYYY', weekly: 'Lifey · {{period}}', monthly: 'Lifey · {{period}}', yearly: 'Lifey · {{period}}' };
-const DEFAULT_HABIT_SETTINGS = {
-  timezone: 'America/Guayaquil',
-  periods: [
-    { id: 'morning', name: 'Morning', start: '00:00', end: '12:00' },
-    { id: 'afternoon', name: 'Afternoon', start: '12:00', end: '18:00' },
-    { id: 'evening', name: 'Evening', start: '18:00', end: '23:59' }
-  ]
-};
 const DEFAULT_ARCHIVE_TEMPLATE = `---
 ## Lifey · {{date}}
 
@@ -38,24 +44,17 @@ const DEFAULT_ARCHIVE_TEMPLATE = `---
 {{places}}
 
 ### Useful finding
-- @burgerlab.ec: 2×1 smash burgers after 18:00 (captured today; high confidence)
+- No useful findings recorded.
 ---`;
-const state = JSON.parse(localStorage.getItem('command-center-state') || 'null') || {
-  tasks: [
-    { id: 't1', text: 'Refine the Today Command Center interaction model', source: `Daily/${todayIso()}.md`, line: 12, done: false, notion: false, calendar: false },
-    { id: 't2', text: 'Send onboarding notes to the studio team', source: `Daily/${todayIso()}.md`, line: 13, done: false, notion: true, calendar: false },
-    { id: 't3', text: 'Block an hour for the final prototype pass', source: 'Projects/Command Center.md', line: 48, done: false, notion: false, calendar: true },
-    { id: 't4', text: 'Review the restaurant promo capture flow', source: `Daily/${todayIso()}.md`, line: 16, done: true, notion: false, calendar: false }
-  ],
-  accounts: [
-    { handle: '@burgerlab.ec', type: 'Restaurant', freshness: 'Today' },
-    { handle: '@mizu.coffee', type: 'Coffee', freshness: 'This week' },
-    { handle: '@buenpan.ec', type: 'Bakery', freshness: 'Older' }
-  ],
-  places: [{ name: 'Home studio', time: '08:10–11:40', source: 'Manual' }, { name: 'La Floresta', time: '12:10–13:00', source: 'Imported' }],
+const state = loadStoredState() || {
+  tasks: [],
+  accounts: [],
+  places: [],
   question: '',
   integrations: { notion: {}, google: {}, spotify: {}, gmail: {} },
 };
+state.tasks ||= [];
+state.accounts ||= [];
 state.integrations ||= { notion: {}, google: {}, spotify: {}, gmail: {} };
 if (state.integrations.google?.clientSecret) delete state.integrations.google.clientSecret;
 state.spotify ||= {};
@@ -151,15 +150,8 @@ function applyAppearance() {
 }
 applyAppearance();
 
-const events = [
-  { time: '09:30', end: '10:15', title: 'Design crit · Orbit', type: 'meeting' },
-  { time: '11:30', end: '12:00', title: 'Focus buffer', type: 'focus' },
-  { time: '15:00', end: '16:00', title: 'Prototype review', type: 'meeting' },
-  { time: '17:30', end: '18:00', title: 'Walk + reset', type: 'personal' },
-];
-const videos = [
-  ['Designing calmer interfaces', '16m', '10:04', 'Captured'], ['The future of local-first software', '21m', '13:20', 'Captured']];
-const suggestions = [
+const EMPTY_CALENDAR_EVENTS = [];
+const EMPTY_INSPIRATION_FIXTURES = [
   { source: 'YouTube · The Futur', time: '36 min', title: 'How great designers make a case for their work', why: 'Matches your prototype-review focus today.' },
   { source: 'Medium Digest', time: '7 min', title: 'The quiet craft of product strategy', why: 'Fresh newsletter link; unread and relevant to your design work.' },
   { source: 'YouTube · NN/g', time: '14 min', title: 'Making dashboards people actually use', why: 'You watched adjacent UI research this morning.' },
@@ -170,7 +162,7 @@ const suggestions = [
 
 let profileSyncTimer;
 function profilePreferences() { return { appearance: state.appearance, visibility: state.visibility, taskDisplay: state.taskDisplay, contentDisplay: state.contentDisplay, heroMetricOrder: state.heroMetricOrder, heroMetricVisibility: state.heroMetricVisibility, cardOrder: state.cardOrder, integrations: state.integrations, habitSettings: state.habitSettings }; }
-function persist() { localStorage.setItem('command-center-state', JSON.stringify(state)); clearTimeout(profileSyncTimer); profileSyncTimer = setTimeout(() => localRequest('/api/profile/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preferences: profilePreferences() }) }).catch(() => {}), 350); }
+function persist() { saveStoredState(state); clearTimeout(profileSyncTimer); profileSyncTimer = setTimeout(() => localRequest('/api/profile/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preferences: profilePreferences() }) }).catch(() => {}), 350); }
 function saveDashboardBackgroundImage(file) {
   if (!file) return;
   if (!file.type.startsWith('image/')) return toast('Choose an image file.');
@@ -198,16 +190,15 @@ function rememberTaskMapping(task) { const existing = state.taskMappings[taskMap
 function scheduleGoogleExpiry() { clearTimeout(window.googleTokenExpiryTimer); const expiresAt = Number(state.google.tokenExpiresAt || 0); if (!state.google.accessToken || !expiresAt) return; const delay = Math.max(0, expiresAt - Date.now()); window.googleTokenExpiryTimer = setTimeout(() => { state.google = { ...state.google, accessToken: '', connected: false, sessionExpired: true }; persist(); render(); }, delay); }
 function clearCompletedForNewDay() { state.tasks = state.tasks.filter(task => !task.done); state.taskDate = new Date().toLocaleDateString('en-CA'); persist(); render(); }
 const nextMidnight = new Date(); nextMidnight.setHours(24, 0, 1, 0); setTimeout(clearCompletedForNewDay, nextMidnight - Date.now());
-async function localRequest(path, options = {}) { const response = await fetch(path, { cache: 'no-store', ...options }); const data = await response.json().catch(() => ({})); if (!response.ok) throw new Error(data.error || 'Local helper request failed.'); return data; }
-async function loadLocalVault(quiet = false) { const note = await localRequest('/api/obsidian/daily'); state.localVaultPath = note.path.replace(/\/[^/]+$/, ''); const tasks = parseTasks(note.markdown, note.path); state.tasks = tasks; persist(); render(); if (!quiet) toast(`Refreshed ${tasks.length} task(s) from your Daily folder.`); }
+async function loadLocalVault(quiet = false) { const note = await localRequest('/api/obsidian/daily'); state.localVaultPath = note.path.replace(/\/[^/]+$/, ''); const tasks = parseTasks(note.markdown, note.path, state.taskMappings); state.tasks = tasks; persist(); render(); if (!quiet) toast(`Refreshed ${tasks.length} task(s) from your Daily folder.`); }
 async function configureLocalVault(path) { const data = await localRequest('/api/obsidian/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dailyNotesPath: path }) }); state.localVaultPath = data.dailyNotesPath; persist(); await loadLocalVault(); }
 async function writeLocalArchive() { const result = await localRequest('/api/obsidian/archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ archive: archiveMarkdown() }) }); toast(`Archive written locally; backup created: ${result.backup.split('/').pop()}`); }
 async function saveArchiveTemplate(template) { state.archiveTemplate = template; persist(); if (!state.localVaultPath) return { localOnly: true }; try { await localRequest('/api/archive-template', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ template }) }); return { localOnly: false }; } catch (error) { return { localOnly: true, error }; } }
 async function configureNotion(token, parentId, titleProperty) { const result = await localRequest('/api/notion/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, parentId, titleProperty }) }); state.notion = { configured: true, dataSourceId: result.dataSourceId }; state.integrations.notion = { database: parentId, property: titleProperty }; persist(); }
 async function diagnoseNotion(token, parentId) { return localRequest('/api/notion/diagnose', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token, parentId }) }); }
 async function listNotionSources(token) { return localRequest('/api/notion/data-sources', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token }) }); }
-async function loadTraccar(view = state.locationView) { try { const data = await localRequest(`/api/location/${view === 'week' ? 'week' : 'today'}`); if (view === 'week' && data.start && data.start !== currentWeekStartIso()) throw new Error(`Location helper returned ${data.start}, not this week.`); if (view === 'week' && !data.days?.some(day => day.date === state.locationWeekDay)) state.locationWeekDay = data.days?.some(day => day.date === todayIso()) ? todayIso() : (data.days?.[0]?.date || todayIso()); state.traccar = { ...state.traccar, connected: true, source: data.source || 'Lifey Location', places: view === 'today' ? (data.places || []) : state.traccar.places, placesDate: view === 'today' ? todayIso() : state.traccar.placesDate, week: view === 'week' ? data : state.traccar.week }; persist(); render(); toast(data.osmError ? `Loaded ${data.positions} points; OpenStreetMap lookup failed: ${data.osmError}` : `Loaded ${data.positions} ${data.source || 'location'} points.`); return data; } catch (error) { state.traccar = { ...state.traccar, connected: false, ...(view === 'today' ? { places: [], placesDate: todayIso() } : { week: { days: [], topPlaces: [], start: currentWeekStartIso() } }) }; persist(); render(); throw error; } }
-async function configureTraccar(server, token, deviceId) { await localRequest('/api/traccar/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server, token, deviceId }) }); state.traccar.connected = true; persist(); await loadTraccar(); }
+async function loadLocationData(view = state.locationView) { try { const data = await localRequest(`/api/location/${view === 'week' ? 'week' : 'today'}`); if (view === 'week' && data.start && data.start !== currentWeekStartIso()) throw new Error(`Location helper returned ${data.start}, not this week.`); if (view === 'week' && !data.days?.some(day => day.date === state.locationWeekDay)) state.locationWeekDay = data.days?.some(day => day.date === todayIso()) ? todayIso() : (data.days?.[0]?.date || todayIso()); state.traccar = { ...state.traccar, connected: true, source: data.source || 'Lifey Location', places: view === 'today' ? (data.places || []) : state.traccar.places, placesDate: view === 'today' ? todayIso() : state.traccar.placesDate, week: view === 'week' ? data : state.traccar.week }; persist(); render(); toast(data.osmError ? `Loaded ${data.positions} points; OpenStreetMap lookup failed: ${data.osmError}` : `Loaded ${data.positions} ${data.source || 'location'} points.`); return data; } catch (error) { state.traccar = { ...state.traccar, connected: false, ...(view === 'today' ? { places: [], placesDate: todayIso() } : { week: { days: [], topPlaces: [], start: currentWeekStartIso() } }) }; persist(); render(); throw error; } }
+async function configureTraccar(server, token, deviceId) { await localRequest('/api/traccar/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ server, token, deviceId }) }); state.traccar.connected = true; persist(); await loadLocationData(); }
 async function setupMobileLocation() { const result = await localRequest('/api/location/mobile/setup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }); state.mobileLocation.configured = true; persist(); return result.token; }
 async function archiveLocationPeriod(period) { const result = await localRequest('/api/obsidian/location-archive', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ period }) }); toast(`${period[0].toUpperCase() + period.slice(1)} location archive written · ${result.placeNotes.length} place note(s) updated.`); }
 async function saveLocationArchiveTemplates(templates) { state.locationArchiveTemplates = { ...DEFAULT_LOCATION_ARCHIVE_TEMPLATES, ...templates }; persist(); const result = await localRequest('/api/location-archive-templates', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ templates: state.locationArchiveTemplates }) }); state.locationArchiveTemplates = result.templates; persist(); }
@@ -290,64 +281,7 @@ async function setHabitState(habit, nextState) { const data = await localRequest
 async function checkLocalHelper() { const status = await localRequest('/api/obsidian/status'); if (status.archiveTemplate) state.archiveTemplate = status.archiveTemplate; try { const [location, locationSettings, titles, profile] = await Promise.all([localRequest('/api/location-archive-templates'), loadLocationSettings(), localRequest('/api/archive-titles'), localRequest('/api/profile/preferences')]); state.locationArchiveTemplates = { ...DEFAULT_LOCATION_ARCHIVE_TEMPLATES, ...(location.templates || {}) }; state.locationSettings = { radiusMeters: locationSettings.radiusMeters || 50, merges: locationSettings.merges || [] }; state.archiveTitles = { ...DEFAULT_ARCHIVE_TITLES, ...(titles.titles || {}) }; const remote = profile.preferences || {}; for (const key of ['appearance', 'visibility', 'taskDisplay', 'contentDisplay', 'heroMetricOrder', 'heroMetricVisibility', 'cardOrder', 'integrations', 'habitSettings']) if (remote[key]) state[key] = remote[key]; state.appearance = normaliseAppearance(state.appearance); state.heroMetricOrder = normaliseHeroMetricOrder(); state.cardOrder = normaliseCardOrder(); state.heroMetricVisibility = HERO_METRIC_KEYS.reduce((visibility, key) => ({ ...visibility, [key]: state.heroMetricVisibility?.[key] !== false }), {}); applyAppearance(); persist(); } catch {} if (status.configured) { state.localVaultPath = status.dailyNotesPath; persist(); await loadLocalVault(true); } }
 async function loadYoutube(quiet = false, view = state.youtubeView) { try { const data = await localRequest(`/api/activity/youtube/${view === 'week' ? 'week' : 'today'}`); if (view === 'week') { if (data.start && data.start !== currentWeekStartIso()) throw new Error(`YouTube helper returned ${data.start}, not this week.`); if (!data.days?.some(day => day.date === state.youtubeWeekDay)) state.youtubeWeekDay = data.days?.some(day => day.date === todayIso()) ? todayIso() : (data.days?.[0]?.date || todayIso()); state.youtube = { ...state.youtube, week: data, extensionLastSeen: data.extensionLastSeen || state.youtube.extensionLastSeen }; } else { state.youtube = { ...state.youtube, ...data }; } persist(); render(); if (!quiet) toast('YouTube activity refreshed.'); return data; } catch (error) { if (view === 'today') state.youtube = { ...state.youtube, date: todayIso(), videos: [], totalActiveSeconds: 0 }; else state.youtube = { ...state.youtube, week: { days: [], videos: [], totalActiveSeconds: 0, start: currentWeekStartIso() } }; persist(); render(); throw error; } }
 async function checkYoutubeTracker() { const data = await localRequest('/api/activity/youtube/today'); state.youtube = data; persist(); render(); toast(data.extensionLastSeen ? 'Tracker reached the local helper. Reload a YouTube watch page next.' : 'No tracker heartbeat yet. Open the extension’s Inspect view in Zen to check its error log.'); }
-function durationLabel(seconds) { const minutes = Math.round(seconds / 60); if (minutes < 1) return '<1 min'; if (minutes < 60) return `${minutes} min`; const hours = Math.floor(minutes / 60), remainder = minutes % 60; return `${hours} hour${hours === 1 ? '' : 's'}${remainder ? `, ${remainder} min` : ''}`; }
-function clockTime(value) { const date = new Date(value); return Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
-function totalTimeLabel(milliseconds) { const minutes = Math.max(0, Math.round(milliseconds / 60000)); if (minutes < 1) return '<1 min'; const hours = Math.floor(minutes / 60), remainder = minutes % 60; return hours ? `${hours}h${remainder ? ` ${remainder}m` : ''}` : `${remainder} min`; }
-function placeDurationMilliseconds(place) { if (Number.isFinite(Number(place.totalSeconds))) return Math.max(0, Number(place.totalSeconds) * 1000); const arrival = new Date(place.arrival), departure = new Date(place.departure); return Number.isNaN(arrival.getTime()) || Number.isNaN(departure.getTime()) ? 0 : Math.max(0, departure.getTime() - arrival.getTime()); }
-function placeTiming(place) { if (place.time) return { range: place.time, total: '' }; const arrival = new Date(place.arrival), departure = new Date(place.departure); if (Number.isNaN(arrival.getTime()) || Number.isNaN(departure.getTime())) return { range: 'Time unavailable', total: '' }; const visits = Number(place.visits || 1); const estimatedMilliseconds = Number.isFinite(Number(place.totalSeconds)) ? Number(place.totalSeconds) * 1000 : departure.getTime() - arrival.getTime(); return { range: `${visits > 1 ? `${visits} visits · ` : ''}${clockTime(place.arrival)} → ${clockTime(place.departure)}`, total: `Estimated time there today: ${totalTimeLabel(estimatedMilliseconds)}` }; }
 function isoDate(date) { return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`; }
-function parseClock(hour, minute = '0', period = '') { let value = Number(hour); const suffix = String(period).replaceAll('.', '').toLowerCase(); if (suffix === 'pm' && value < 12) value += 12; if (suffix === 'am' && value === 12) value = 0; return `${String(value).padStart(2, '0')}:${String(minute || '0').padStart(2, '0')}`; }
-function naturalDate(text) {
-  const todayDate = new Date(); const weekdays = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']; const months = ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december'];
-  const countedDays = text.match(/\b(?:in\s+(\d+)\s+days?|(\d+)\s+days?\s+from\s+now)\b/i);
-  if (countedDays) { const date = new Date(todayDate); date.setDate(date.getDate() + Number(countedDays[1] || countedDays[2])); return { value: isoDate(date), phrase: countedDays[0] }; }
-  const relative = text.match(/\b(the\s+day\s+after\s+tomorrow|tomorrow|today)\b/i);
-  if (relative) { const date = new Date(todayDate); date.setDate(date.getDate() + (/day\s+after/i.test(relative[0]) ? 2 : /^tomorrow$/i.test(relative[0]) ? 1 : 0)); return { value: isoDate(date), phrase: relative[0] }; }
-  const weekday = text.match(/\bnext\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/i);
-  if (weekday) { const target = weekdays.indexOf(weekday[1].toLowerCase()); let delta = (target - todayDate.getDay() + 7) % 7; if (!delta) delta = 7; const date = new Date(todayDate); date.setDate(date.getDate() + delta); return { value: isoDate(date), phrase: weekday[0] }; }
-  const monthFirst = text.match(/\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})(?:st|nd|rd|th)?\b/i);
-  const dayFirst = text.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+of\s+(january|february|march|april|may|june|july|august|september|october|november|december)\b/i);
-  const match = monthFirst || dayFirst;
-  if (!match) return null;
-  const month = months.indexOf((monthFirst ? match[1] : match[2]).toLowerCase()), day = Number(monthFirst ? match[2] : match[1]); let year = todayDate.getFullYear(); const date = new Date(year, month, day); if (date < new Date(todayDate.getFullYear(), todayDate.getMonth(), todayDate.getDate())) date.setFullYear(++year); return { value: isoDate(date), phrase: match[0] };
-}
-function parseNaturalTask(raw, controls = {}) {
-  let text = String(raw || '').trim(), due = controls.due || '', time = controls.time || '', recurrence = '', priority = controls.priority || '';
-  let project = controls.project || '', estimate = '', actualTime = '';
-  const explicitDate = text.match(/📅\s*(\d{4}-\d{2}-\d{2})/); if (explicitDate) { due = explicitDate[1]; text = text.replace(explicitDate[0], ' '); }
-  const explicitProject = text.match(/#project\/([A-Za-z0-9/_-]+)/i); if (explicitProject) { project = explicitProject[1]; text = text.replace(explicitProject[0], ' '); }
-  const naturalProject = !project && text.match(/\b(?:for|on|in)\s+(?:the\s+)?project\s+([A-Za-z0-9][A-Za-z0-9 _/-]*?)(?=\s+(?:estimated time|around|it will take|it took|tomorrow|today|next|at|every|priority|!|#)|$)/i);
-  if (naturalProject) { project = naturalProject[1]; text = text.replace(naturalProject[0], ' '); }
-  const projectSuffix = text.match(/\bproject\s+([A-Za-z0-9][A-Za-z0-9 _/-]*?)$/i);
-  if (!project && projectSuffix) { project = projectSuffix[1]; text = text.replace(projectSuffix[0], ' '); }
-  const explicitEstimate = text.match(/\[estimate::\s*([0-9]+(?:\.[0-9]+)?)\]/i); if (explicitEstimate) { estimate = explicitEstimate[1]; text = text.replace(explicitEstimate[0], ' '); }
-  const explicitActual = text.match(/\[time::\s*([0-9]+(?:\.[0-9]+)?)\]/i); if (explicitActual) { actualTime = explicitActual[1]; text = text.replace(explicitActual[0], ' '); }
-  const estimatePhrase = !estimate && text.match(/\b(?:estimated\s+time|around|it\s+will\s+take|will\s+take|takes?)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?|h)?\b/i);
-  if (estimatePhrase) { estimate = estimatePhrase[1]; text = text.replace(estimatePhrase[0], ' '); }
-  const actualPhrase = !actualTime && text.match(/\b(?:it\s+took|took|actual(?:ly)?\s+took)\s+([0-9]+(?:\.[0-9]+)?)\s*(?:hours?|hrs?|h)?\b/i);
-  if (actualPhrase) { actualTime = actualPhrase[1]; text = text.replace(actualPhrase[0], ' '); }
-  const foundDate = naturalDate(text); if (foundDate) { due = foundDate.value; text = text.replace(foundDate.phrase, ' '); }
-  const explicitTime = text.match(/⏰\s*([01]?\d|2[0-3]):([0-5]\d)(?:\s*(?:-|–|to)\s*([01]?\d|2[0-3]):([0-5]\d))?/); if (explicitTime) { time = `${String(explicitTime[1]).padStart(2, '0')}:${explicitTime[2]}${explicitTime[3] ? `–${String(explicitTime[3]).padStart(2, '0')}:${explicitTime[4]}` : ''}`; text = text.replace(explicitTime[0], ' '); }
-  const recurring = text.match(/\bevery\s+(?:(\d+)\s+)?(days?|weeks?|months?|years?)\b/i);
-  if (recurring) { recurrence = `every ${recurring[1] ? `${recurring[1]} ` : ''}${recurring[2].toLowerCase()}`; text = text.replace(recurring[0], ' '); }
-  if (controls.recurring && !recurrence) recurrence = controls.recurring;
-  const meridiemTime = text.match(/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)(?:\s*(?:-|–|to)\s*(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?)?\b/i);
-  const twentyFourTime = !meridiemTime && text.match(/\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)(?:\s*(?:-|–|to)\s*([01]?\d|2[0-3]):([0-5]\d))?\b/i);
-  if (meridiemTime) { const detected = `${parseClock(meridiemTime[1], meridiemTime[2], meridiemTime[3])}${meridiemTime[4] ? `–${parseClock(meridiemTime[4], meridiemTime[5], meridiemTime[6] || meridiemTime[3])}` : ''}`; time = detected; text = text.replace(meridiemTime[0], ' '); }
-  else if (twentyFourTime) { const detected = `${parseClock(twentyFourTime[1], twentyFourTime[2])}${twentyFourTime[3] ? `–${parseClock(twentyFourTime[3], twentyFourTime[4])}` : ''}`; time = detected; text = text.replace(twentyFourTime[0], ' '); }
-  const milestone = /#milestone\b/i.test(text); if (milestone) text = text.replace(/#milestone\b/ig, ' ');
-  const priorityEmoji = text.match(/[⏫🔼🔽⏬]/); const foundPriority = text.match(/(?:\bpriority\s*(highest|high|low|lowest)?\b|!(highest|high|low|lowest)?\b)/i); if (priorityEmoji) { priority = priorityEmoji[0]; text = text.replace(priorityEmoji[0], ' '); } else if (foundPriority) { const value = (foundPriority[1] || foundPriority[2] || 'highest').toLowerCase(); priority = ({ highest: '⏫', high: '🔼', low: '🔽', lowest: '⏬' })[value]; text = text.replace(foundPriority[0], ' '); }
-  text = text.replace(/\s{2,}/g, ' ').trim().replace(/[,.]$/, '');
-  const projectTag = project ? `#project/${projectSlug(project)}` : '';
-  const metadata = [projectTag, milestone && '#milestone', estimate && `[estimate:: ${estimate}]`, actualTime && `[time:: ${actualTime}]`, due && `📅 ${due}`, time && `⏰ ${time}`, priority, recurrence && `🔁 ${recurrence}`].filter(Boolean);
-  return { text: [text, ...metadata].filter(Boolean).join(' '), due, time, priority, recurrence, project: projectTag, estimate, actualTime, milestone };
-}
-function taskCaptureValues(task) { let text = String(task?.text || ''); const due = text.match(/📅\s*(\d{4}-\d{2}-\d{2})/); const time = text.match(/⏰\s*([01]?\d|2[0-3]):([0-5]\d)(?:\s*(?:-|–|to)\s*[01]?\d:[0-5]\d)?/); const priority = text.match(/[⏫🔼🔽⏬]/); const recurring = text.match(/🔁\s*(every\s+(?:(?:\d+)\s+)?(?:days?|weeks?|months?|years?))/i); const project = text.match(/#project\/([A-Za-z0-9/_-]+)/i); text = text.replace(/#project\/[A-Za-z0-9/_-]+/gi, '').replace(/📅\s*\d{4}-\d{2}-\d{2}/g, '').replace(/⏰\s*[01]?\d:[0-5]\d(?:\s*(?:-|–|to)\s*[01]?\d:[0-5]\d)?/g, '').replace(/[⏫🔼🔽⏬]/g, '').replace(/🔁\s*every\s+(?:(?:\d+)\s+)?(?:days?|weeks?|months?|years?)/gi, '').replace(/\s{2,}/g, ' ').trim(); return { text, due: due?.[1] || '', time: time ? `${String(time[1]).padStart(2, '0')}:${time[2]}` : '', priority: priority?.[0] || '', recurrence: recurring?.[1]?.toLowerCase() || '', project: project?.[1] || '' }; }
-function captureDayTimeLabel(dateValue, timeValue) { if (!dateValue && !timeValue) return '📅 ⏰ Day & time'; const date = dateValue ? new Date(`${dateValue}T12:00:00`).toLocaleDateString([], { month: 'short', day: 'numeric' }) : 'Day'; return `📅 ${date} · ⏰ ${timeValue || 'Time'}`; }
-const CAPTURE_PRIORITIES = [{ value: '', label: '❗️ Priority' }, { value: '⏫', label: '❗️ ⏫ Highest' }, { value: '🔼', label: '❗️ 🔼 High' }, { value: '🔽', label: '❗️ 🔽 Low' }, { value: '⏬', label: '❗️ ⏬ Lowest' }];
-const CAPTURE_RECURRENCES = ['', 'every day', 'every 2 days', 'every 3 days', 'every week', 'every month', 'every year'];
-function capturePriorityLabel(value) { return CAPTURE_PRIORITIES.find(option => option.value === value)?.label || '❗️ Priority'; }
-function captureRecurringLabel(value) { return value ? `🔁 ${value.replace(/^every\s/, 'Every ')}` : '🔁 Recurring'; }
 function refocusCaptureInput() { const input = document.querySelector('#capture-task'); if (!input) return; input.focus({ preventScroll: true }); input.setSelectionRange(input.value.length, input.value.length); }
 function renderCaptureCalendar() { const holder = document.querySelector('#capture-calendar'); if (!holder) return; const month = window.captureCalendarMonth || new Date(); const year = month.getFullYear(), monthIndex = month.getMonth(); const firstDay = new Date(year, monthIndex, 1).getDay(), days = new Date(year, monthIndex + 1, 0).getDate(); const selected = document.querySelector('#capture-date')?.value; const cells = [...Array(firstDay).fill('<span></span>'), ...Array.from({ length: days }, (_, index) => { const date = isoDate(new Date(year, monthIndex, index + 1)); return `<button type="button" class="${date === selected ? 'selected' : ''}" data-action="capture-calendar-select" data-date="${date}">${index + 1}</button>`; })].join(''); const time = document.querySelector('#capture-time')?.value || ''; let [hour = 9, minute = 0] = time ? time.split(':').map(Number) : []; const period = window.captureTimePeriod || (hour >= 12 ? 'pm' : 'am'); const displayHour = hour % 12 || 12, mode = window.captureClockMode || 'hour'; const values = mode === 'hour' ? Array.from({ length: 12 }, (_, i) => i + 1) : Array.from({ length: 12 }, (_, i) => String(i * 5).padStart(2, '0')); const clockButtons = values.map((value, index) => { const angle = (index * 30 - 90) * Math.PI / 180, left = 50 + 39 * Math.cos(angle), top = 50 + 39 * Math.sin(angle); const selectedValue = mode === 'hour' ? Number(value) === displayHour : Number(value) === minute; return `<button type="button" class="${selectedValue ? 'selected' : ''}" style="--x:${left}%;--y:${top}%" data-action="capture-clock-select" data-value="${value}">${value}</button>`; }).join(''); holder.innerHTML = `<div class="capture-datetime"><div class="capture-calendar"><header><button type="button" data-action="capture-calendar-prev">‹</button><strong>${month.toLocaleDateString([], { month: 'long', year: 'numeric' })}</strong><button type="button" data-action="capture-calendar-next">›</button></header><div class="calendar-weekdays"><span>S</span><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span></div><div class="calendar-days">${cells}</div></div><div class="capture-clock"><div class="clock-readout"><button type="button" class="${mode === 'hour' ? 'selected' : ''}" data-action="capture-clock-mode" data-mode="hour">${String(displayHour).padStart(2, '0')}</button><span>:</span><button type="button" class="${mode === 'minute' ? 'selected' : ''}" data-action="capture-clock-mode" data-mode="minute">${String(minute).padStart(2, '0')}</button></div><div class="clock-period"><button type="button" class="${period === 'am' ? 'selected' : ''}" data-action="capture-clock-period" data-period="am">AM</button><button type="button" class="${period === 'pm' ? 'selected' : ''}" data-action="capture-clock-period" data-period="pm">PM</button></div><p>Select ${mode === 'hour' ? 'hour' : 'minutes'}</p><div class="analog-clock">${clockButtons}<i></i></div></div></div>`; }
 function capturePlaceNames() { const names = [...(state.placeLabels || []).map(label => label.name), ...(state.places || []).filter(place => place.source === 'Manual').map(place => place.name)].map(name => String(name || '').trim()).filter(Boolean); return [...new Set(names)].sort((a, b) => a.localeCompare(b)); }
@@ -364,10 +298,7 @@ function ensureCapturePlaceContext() { const input = document.querySelector('#ca
 function selectedCapturePlaceName() { const holder = document.querySelector('#capture-place-dropdown'); return holder?.querySelector('.selected[data-place-name]')?.dataset.placeName || ''; }
 function quickCaptureControls() { return { due: document.querySelector('#capture-date')?.value, time: document.querySelector('#capture-time')?.value, priority: document.querySelector('#capture-priority')?.value, recurring: document.querySelector('#capture-recurring')?.value, project: window.captureProjectSlug || '' }; }
 function refreshQuickCapturePreview() { const input = document.querySelector('#capture-task'); if (!input) return; const parsed = parseNaturalTask(input.value, quickCaptureControls()); const preview = document.querySelector('#capture-preview'); const dateLabel = document.querySelector('#capture-date-label'), priority = document.querySelector('#capture-priority'), recurring = document.querySelector('#capture-recurring'); if (dateLabel) dateLabel.textContent = captureDayTimeLabel(document.querySelector('#capture-date')?.value || parsed.due, document.querySelector('#capture-time')?.value || parsed.time); const priorityLabel = document.querySelector('#capture-priority-label'), recurringLabel = document.querySelector('#capture-recurring-label'); if (priorityLabel) priorityLabel.textContent = capturePriorityLabel(priority?.value || ''); if (recurringLabel) recurringLabel.textContent = captureRecurringLabel(recurring?.value || ''); if (preview) preview.textContent = parsed.text ? `- [ ] ${parsed.text}` : 'Start typing to preview the task Markdown.'; }
-function escape(value) { return String(value).replace(/[&<>"']/g, m => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#039;' })[m]); }
-function badge(label, kind = '') { return `<span class="badge ${kind}">${label}</span>`; }
 function toast(message) { const el = document.querySelector('#toast'); el.textContent = message; el.classList.add('show'); setTimeout(() => el.classList.remove('show'), 2600); }
-function stat(label, value, meta, tone) { return `<div class="stat ${tone || ''}"><span>${label}</span><strong>${value}</strong><small>${meta}</small></div>`; }
 function cardOrderStyle(key) { const fallback = CARD_KEYS.indexOf(key); const index = state.cardOrder.indexOf(key); return `style="order:${index >= 0 ? index : fallback}"`; }
 function activeDialog() { return [...document.querySelectorAll('dialog[open]')].at(-1) || document.querySelector('#modal'); }
 function closeActiveDialog() { activeDialog()?.close(); updateMobileCaptureOffset(); }
@@ -399,6 +330,21 @@ function arrangeDashboardCards() {
   });
   orderedCards.forEach((card, index) => columns[index % columnCount].append(card));
   grid.replaceChildren(...columns);
+}
+function renderDashboardShell() {
+  const app = document.querySelector('#app');
+  if (!app) return;
+  if (!app.querySelector('.shell') || !app.querySelector('#dashboard-stats') || !app.querySelector('#dashboard-grid')) {
+    app.innerHTML = `
+  <div class="shell">
+    <nav><a class="brand" href="#top" aria-label="Lifey home"><span class="brand-mark">L.</span><span class="brand-name">Lifey</span></a><div class="nav-actions"><button class="button ghost archive-action" data-action="archive"><span class="action-arrow">↗</span>Update daily archive</button><button class="button quick-action" data-action="quick-add">＋ <span>Quick capture</span></button><button class="settings" data-action="settings" title="Settings (⌘ .)" aria-label="Settings, shortcut Command period">⚙<kbd>⌘ .</kbd></button></div></nav>
+    <section class="hero" id="top"><h1 class="date-title"></h1></section>
+    <div id="dashboard-stats"></div>
+    <div class="grid" id="dashboard-grid"></div>
+  </div>`;
+  }
+  const dateTitle = app.querySelector('.date-title');
+  if (dateTitle) dateTitle.textContent = todayJournalDatePadded();
 }
 async function saveGoogleHelperConfig(clientSecret = '') {
   const google = state.integrations.google || {};
@@ -548,24 +494,6 @@ async function diagnoseSpotify() {
   const allForbidden = checks.every(check => Number(check.status) === 403);
   modal('Spotify diagnostic', `<p class="modal-copy">${allForbidden ? 'Spotify is refusing this access token for every endpoint, including profile. This usually means the Spotify account is not allowed in the app dashboard/development mode, or the token was issued before the required scopes were granted.' : 'This is the raw status Lifey gets from Spotify. If current playback says <strong>403</strong>, use Reconnect. If it says <strong>204</strong>, Spotify is saying there is no active playback visible to the API.'}</p><div class="spotify-diagnostic">${rows}</div>`, 'close');
 }
-function spotifyArtwork(item = {}) { return item.album?.images?.[0]?.url || item.images?.[0]?.url || ''; }
-function spotifyTrackFromItem(item = {}, playedAt = new Date().toISOString(), source = 'recently-played') {
-  const track = item.track || item;
-  const artists = (track.artists || []).map(artist => ({ id: artist.id || artist.name, name: artist.name || 'Unknown artist' }));
-  return {
-    playId: `${track.id || track.name || 'track'}:${playedAt}`,
-    trackId: track.id || track.uri || track.name || '',
-    title: track.name || 'Untitled track',
-    artists,
-    artist: artists.map(artist => artist.name).join(', ') || 'Unknown artist',
-    album: track.album?.name || '',
-    artwork: spotifyArtwork(track),
-    durationMs: Number(track.duration_ms || 0),
-    playedAt,
-    lastSeen: playedAt,
-    source
-  };
-}
 function spotifyTrimHistory() {
   const cutoff = new Date();
   cutoff.setMonth(cutoff.getMonth() - 4);
@@ -583,38 +511,6 @@ function spotifyCurrentFromPlayback(playback) {
   if (!item) return null;
   const current = spotifyTrackFromItem(item, new Date().toISOString(), 'currently-playing');
   return { ...current, isPlaying: Boolean(playback.is_playing), progressMs: Number(playback.progress_ms || 0), capturedAt: new Date().toISOString() };
-}
-function spotifyRangeStart(range = state.spotify.range) {
-  const date = new Date();
-  date.setHours(0, 0, 0, 0);
-  if (range === 'week') date.setDate(date.getDate() - ((date.getDay() + 6) % 7));
-  if (range === 'month') date.setDate(1);
-  return date;
-}
-function spotifyHistoryForRange(range = state.spotify.range) {
-  const start = spotifyRangeStart(range).getTime();
-  return (state.spotify.history || []).filter(play => new Date(play.playedAt || 0).getTime() >= start);
-}
-function spotifyStats(range = state.spotify.range) {
-  const plays = spotifyHistoryForRange(range);
-  const songs = new Map(), artists = new Map();
-  for (const play of plays) {
-    const minutes = Math.max(1, Math.round(Number(play.durationMs || 0) / 60000));
-    const songKey = play.trackId || `${play.title}:${play.artist}`;
-    const song = songs.get(songKey) || { title: play.title, artist: play.artist, artwork: play.artwork, playbacks: 0, minutes: 0 };
-    song.playbacks += 1; song.minutes += minutes; if (!song.artwork && play.artwork) song.artwork = play.artwork; songs.set(songKey, song);
-    for (const artist of play.artists || [{ id: play.artist, name: play.artist }]) {
-      const artistKey = artist.id || artist.name;
-      const row = artists.get(artistKey) || { name: artist.name, playbacks: 0, minutes: 0, artwork: play.artwork };
-      row.playbacks += 1; row.minutes += minutes; if (!row.artwork && play.artwork) row.artwork = play.artwork; artists.set(artistKey, row);
-    }
-  }
-  return {
-    plays,
-    songs: [...songs.values()].sort((a, b) => b.playbacks - a.playbacks || b.minutes - a.minutes).slice(0, 10),
-    artists: [...artists.values()].sort((a, b) => b.minutes - a.minutes || b.playbacks - a.playbacks).slice(0, 10),
-    minutes: plays.reduce((sum, play) => sum + Math.max(1, Math.round(Number(play.durationMs || 0) / 60000)), 0)
-  };
 }
 function startSpotifyPolling() {
   clearInterval(window.spotifyPollingTimer);
@@ -651,7 +547,7 @@ async function loadSpotify(options = {}) {
       : 'No active Spotify playback was found. Start Spotify on any device, then refresh.';
   }
   const endpointNotes = [profile, recent, currentlyPlaying, playerState].filter(result => result.error && !String(result.error).includes('session expired')).map(result => `${result.label}: ${result.error}`);
-  const stats = spotifyStats(state.spotify.range);
+  const stats = spotifyStats(state.spotify, state.spotify.range);
   state.spotify.connected = Boolean(state.spotify.accessToken);
   state.spotify.minutes = stats.minutes;
   state.spotify.errors = [];
@@ -735,55 +631,13 @@ function projectDetail(project, progress = null) {
 }
 function habitStateMark(stateValue) { return stateValue === 'completed' ? '✓' : stateValue === 'skipped' ? '−' : ''; }
 function habitStateClass(stateValue) { return stateValue === 'completed' ? 'done' : stateValue === 'skipped' ? 'skipped' : ''; }
-function timeToMinutes(value) { const match = String(value || '').match(/^([01]?\d|2[0-3]):([0-5]\d)$/); return match ? Number(match[1]) * 60 + Number(match[2]) : null; }
-function minutesInRange(minutes, start, end) { if (!Number.isFinite(minutes) || !Number.isFinite(start) || !Number.isFinite(end)) return false; return start <= end ? minutes >= start && minutes < end : minutes >= start || minutes < end; }
-function habitPeriods() { return (state.habitSettings?.periods || DEFAULT_HABIT_SETTINGS.periods).map((period, index) => ({ ...period, id: period.id || `period-${index + 1}`, startMinutes: timeToMinutes(period.start), endMinutes: timeToMinutes(period.end) })).filter(period => period.name && Number.isFinite(period.startMinutes) && Number.isFinite(period.endMinutes)); }
-function zonedParts(timezone = state.habitSettings?.timezone || DEFAULT_HABIT_SETTINGS.timezone) {
-  try {
-    const parts = new Intl.DateTimeFormat('en-CA', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).formatToParts(new Date());
-    const get = type => parts.find(part => part.type === type)?.value;
-    let hour = Number(get('hour'));
-    if (hour === 24) hour = 0;
-    return { date: `${get('year')}-${get('month')}-${get('day')}`, minutes: hour * 60 + Number(get('minute')) };
-  } catch {
-    return { date: todayIso(), minutes: new Date().getHours() * 60 + new Date().getMinutes() };
-  }
-}
-function habitPeriod(habit) {
-  const minutes = Number(habit.timeMinutes);
-  if (!Number.isFinite(minutes)) return 'anytime';
-  return habitPeriods().find(period => minutesInRange(minutes, period.startMinutes, period.endMinutes))?.id || 'anytime';
-}
-function habitPeriodLabel(periodId) { return habitPeriods().find(period => period.id === periodId)?.name || (periodId === 'anytime' ? 'Anytime' : periodId); }
-function habitPeriodMeta(periodId) { const period = habitPeriods().find(item => item.id === periodId); return period ? `${period.start} – ${period.end}` : 'No set time'; }
-function isMissedHabit(habit) {
-  if (habit.state !== 'pending') return false;
-  const now = zonedParts();
-  const habitDate = habit.dueDate || state.habits.date || now.date;
-  if (habitDate > now.date) return false;
-  if (habitDate < now.date) return true;
-  const minutes = Number(habit.timeMinutes);
-  if (!Number.isFinite(minutes)) return false;
-  const period = habitPeriods().find(item => item.id === habitPeriod(habit));
-  if (!period) return false;
-  return period.startMinutes <= period.endMinutes ? now.minutes >= period.endMinutes : now.minutes >= period.endMinutes && now.minutes < period.startMinutes;
-}
-function habitStreak(habit) {
-  const name = String(habit.habit || '').trim().toLowerCase();
-  const byDate = new Map((state.habits.history || []).filter(entry => String(entry.habit || '').trim().toLowerCase() === name).map(entry => [entry.date, entry.state]));
-  if (habit.date) byDate.set(habit.date, habit.state);
-  const dates = [...byDate.keys()].filter(Boolean).sort().reverse();
-  const today = zonedParts().date;
-  let started = false, count = 0;
-  for (const date of dates) {
-    const value = byDate.get(date);
-    if (!started && date === today && value !== 'completed') continue;
-    started = true;
-    if (value !== 'completed') break;
-    count += 1;
-  }
-  return count;
-}
+function habitPeriods() { return habitPeriodsForSettings(state.habitSettings); }
+function zonedParts(timezone = state.habitSettings?.timezone || DEFAULT_HABIT_SETTINGS.timezone) { return zonedPartsForSettings(timezone, todayIso); }
+function habitPeriod(habit) { return habitPeriodForSettings(habit, state.habitSettings); }
+function habitPeriodLabel(periodId) { return habitPeriodLabelForSettings(periodId, state.habitSettings); }
+function habitPeriodMeta(periodId) { return habitPeriodMetaForSettings(periodId, state.habitSettings); }
+function isMissedHabit(habit) { return isMissedHabitForState(habit, state, state.habitSettings, todayIso); }
+function habitStreak(habit) { return habitStreakForState(habit, state, state.habitSettings, todayIso); }
 function habitRow(habit) {
   const missed = isMissedHabit(habit);
   const streak = habitStreak(habit);
@@ -838,13 +692,13 @@ function render() {
     return allDay
       ? { id: event.id, title: event.summary || '(Untitled event)', type: 'all-day', allDay: true }
       : { id: event.id, time: new Date(event.start?.dateTime || `${event.start?.date}T00:00:00`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), end: new Date(event.end?.dateTime || `${event.end?.date}T00:00:00`).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), title: event.summary || '(Untitled event)', type: 'meeting', allDay: false };
-  }) : events;
+  }) : EMPTY_CALENDAR_EVENTS;
   const allDayEvents = calendarEvents.filter(event => event.allDay);
   const timedCalendarEvents = calendarEvents.filter(event => !event.allDay);
   const gmailSuggestions = state.gmail.connected ? state.gmail.messages.map(message => ({ source: `Gmail · ${message.from.split('<')[0].trim()}`, time: 'new', title: message.subject, why: message.snippet || 'Fresh message captured from your configured Gmail search.', url: `https://mail.google.com/mail/u/0/#all/${message.id}` })) : null;
-  const availableSuggestions = gmailSuggestions || suggestions;
+  const availableSuggestions = gmailSuggestions || EMPTY_INSPIRATION_FIXTURES;
   const contentSuggestions = state.locationView === 'week' ? availableSuggestions : availableSuggestions.slice(0, state.contentDisplay.limit);
-  const spotifyPeriodStats = spotifyStats(spotify.range || 'today');
+  const spotifyPeriodStats = spotifyStats(spotify, spotify.range || 'today');
   const spotifyMinutes = Number(spotifyPeriodStats.minutes || 0);
   const currentTrack = spotify.current || null;
   const spotifyArtworkUrl = currentTrack?.artwork || '';
@@ -881,11 +735,11 @@ function render() {
     tasks: () => stat('Tasks', `${openTasks} left`, 'exact · Obsidian', 'yellow'),
     projects: () => stat('Projects', `${activeProjectCount} active`, projectData.taskCount ? `${projectProgress}% complete` : 'no tagged tasks yet', 'yellow'),
     habits: () => stat('Habits', `${habitCompleted}/${habitScheduled}`, 'today · Obsidian', 'yellow'),
-    calendar: () => stat('Calendar', `${calendarEvents.length} events`, state.google.connected ? 'exact · Google Calendar' : 'demo · configure', 'blue'),
+    calendar: () => stat('Calendar', `${calendarEvents.length} events`, state.google.connected ? 'exact · Google Calendar' : 'not connected', 'blue'),
     youtube: () => stat('YouTube', youtube.videos.length ? durationLabel(youtube.totalActiveSeconds) : '—', youtube.videos.length ? 'active tab time' : 'extension not connected', 'lime'),
     spotify: () => stat('Spotify', spotify.connected ? (spotifyMinutes ? durationLabel(spotifyMinutes * 60) : 'connected') : '—', spotify.connected ? 'read-only API' : 'not connected', 'violet'),
     places: () => stat('Places', `${(placeData || []).length} visited`, state.traccar.connected ? `estimated · ${totalTimeLabel(placeTotal)}` : 'location not connected', 'blue'),
-    suggestions: () => stat('Inspiration', `${contentSuggestions.length} items`, state.gmail.connected ? 'Gmail · fresh' : 'local defaults', 'blue')
+    suggestions: () => stat('Inspiration', `${contentSuggestions.length} items`, state.gmail.connected ? 'Gmail · fresh' : 'starter fixtures', 'blue')
   };
   const heroStats = state.heroMetricOrder.filter(key => state.heroMetricVisibility?.[key] !== false && heroMetric[key]).map(key => heroMetric[key]());
   const placeRow = (p, index, actions = false, date = '') => { const timing = placeTiming(p); const hasCoordinates = state.traccar.connected && Number.isFinite(p.latitude) && Number.isFinite(p.longitude); const selected = placeMergeSelection.includes(index); const hasPointDetail = (p.points || []).length > 1; const pointButton = hasPointDetail ? `<button class="icon-button place-points" title="See ${p.points.length} captured points" aria-label="See ${p.points.length} captured points" data-action="view-place-points" data-place-index="${index}" data-place-date="${date}">◎</button>` : ''; const mapButton = hasCoordinates ? `<button class="icon-button place-map" title="Open in Google Maps" aria-label="Open in Google Maps" data-action="open-place-map" data-latitude="${p.latitude}" data-longitude="${p.longitude}">↗</button>` : ''; const passiveControls = hasPointDetail ? pointButton : mapButton; return `<div class="${p.merged ? 'is-merged' : ''}">${placeMergeMode && actions ? `<button class="place-select ${selected ? 'selected' : ''}" title="Select ${escape(p.name)}" aria-label="Select ${escape(p.name)}" data-action="toggle-place-merge" data-place-index="${index}">${selected ? '✓' : ''}</button>` : '<span class="pin">✦</span>'}<p><strong>${escape(p.name)}${p.merged ? '<span class="merged-place" title="Manual merge">★</span>' : ''}</strong><small>${escape(timing.range)} · ${escape(p.source)}${timing.total ? `<br><span class="place-total">${escape(timing.total)}</span>` : ''}</small></p>${actions && hasCoordinates && !placeMergeMode ? `${pointButton}<button class="icon-button place-label" title="Name this place" aria-label="Name this place" data-action="label-place" data-place-index="${index}">✎</button>${mapButton}` : !placeMergeMode ? passiveControls : ''}</div>`; };
@@ -904,22 +758,20 @@ function render() {
   const habitGraphContent = `${habitRange}${habitGraph(habitData.dailyTotals || [], habitData.range || 'month')}`;
   const habitArchivedContent = `${habitRange}<div class="archived-habits">${(habitData.archived || []).length ? habitData.archived.map(habit => archivedHabitPanel(habit, habitData.history || [], habitData.range || 'month')).join('') : '<p class="muted">No archived habits in Active Habits.md yet.</p>'}</div>`;
   const habitContent = habitData.view === 'calendar' ? habitCalendarContent : habitData.view === 'graph' ? habitGraphContent : habitData.view === 'archived' ? habitArchivedContent : habitTodayContent;
-  document.querySelector('#app').innerHTML = `
-  <div class="shell">
-    <nav><a class="brand" href="#top" aria-label="Lifey home"><span class="brand-mark">L.</span><span class="brand-name">Lifey</span></a><div class="nav-actions"><button class="button ghost archive-action" data-action="archive"><span class="action-arrow">↗</span>Update daily archive</button><button class="button quick-action" data-action="quick-add">＋ <span>Quick capture</span></button><button class="settings" data-action="settings" title="Settings (⌘ .)" aria-label="Settings, shortcut Command period">⚙<kbd>⌘ .</kbd></button></div></nav>
-    <section class="hero" id="top"><h1 class="date-title">${todayJournalDatePadded()}</h1></section>
-    ${heroStats.length ? `<section class="stats">${heroStats.join('')}</section>` : ''}
-    <div class="grid">
+  renderDashboardShell();
+  const statsRoot = document.querySelector('#dashboard-stats');
+  if (statsRoot) statsRoot.innerHTML = heroStats.length ? `<section class="stats">${heroStats.join('')}</section>` : '';
+  const gridRoot = document.querySelector('#dashboard-grid');
+  if (gridRoot) gridRoot.innerHTML = `
       <section class="panel tasks-panel ${state.visibility.tasks === false ? 'hidden-by-preference' : ''}" data-card-key="tasks" ${cardOrderStyle('tasks')}><header><div><p class="eyebrow">OBSIDIAN</p><h2>Today’s tasks</h2></div>${badge('vault synced', 'exact')}</header>${locationTaskSection}<div class="task-list">${normalActiveTasks.map(taskCard).join('')}</div>${completedTasks.length ? `<details class="completed-tasks"><summary><span>Completed</span><span class="completed-count">${completedTasks.length}</span><span class="completed-chevron">⌄</span></summary><div class="completed-list">${completedTasks.map(taskCard).join('')}</div></details>` : ''}<footer><button class="text-button" data-action="refresh-vault">↻ Refresh daily note</button></footer></section>
       <section class="panel projects-panel ${state.visibility.projects === false ? 'hidden-by-preference' : ''}" data-card-key="projects" ${cardOrderStyle('projects')}><header><div><p class="eyebrow">PROJECTS</p><h2>Active projects</h2></div>${badge(`${projectData.projects?.length || 0} found`, 'exact')}</header><div class="project-list">${visibleProjects.length ? visibleProjects.map(projectCard).join('') : '<p class="muted">No project-tagged tasks found yet. Add #project/project-name to tasks in your daily notes.</p>'}</div><footer><button class="text-button" data-action="refresh-projects">↻ Refresh projects</button><span>${projectData.taskCount || 0} tagged task(s)</span></footer></section>
       <section class="panel habits-panel ${state.visibility.habits === false ? 'hidden-by-preference' : ''}" data-card-key="habits" ${cardOrderStyle('habits')}><header><div><p class="eyebrow">HABITS</p><h2>Daily practice</h2></div>${badge(`${habitsToday.filter(h => h.state === 'completed').length}/${habitsToday.length || 0}`, 'exact')}</header><div class="places-switch habits-tabs" role="tablist">${habitTabs}</div><div class="habit-content">${habitContent}</div><footer><button class="text-button" data-action="refresh-habits">↻ Refresh habits</button><button class="text-button" data-action="sync-habits">＋ Sync from Active Habits</button></footer></section>
-      <section class="panel calendar ${state.visibility.calendar === false ? 'hidden-by-preference' : ''}" data-card-key="calendar" ${cardOrderStyle('calendar')}><header><div><p class="eyebrow">GOOGLE CALENDAR</p><h2>Day in motion</h2></div>${badge(state.google.connected ? 'connected' : state.google.sessionExpired ? 'reconnect' : 'not connected', state.google.connected ? 'exact' : 'estimated')}</header>${allDayEvents.length ? `<div class="all-day-events">${allDayEvents.map(e => `<div class="all-day-event"><span>All day</span><strong>${escape(e.title)}</strong>${e.id ? `<button class="icon-button event-delete" title="Delete Calendar event" aria-label="Delete ${escape(e.title)}" data-action="delete-calendar-event" data-event-id="${escape(e.id)}">×</button>` : ''}</div>`).join('')}</div>` : ''}<div class="timeline">${timedCalendarEvents.map((e,i) => `<div class="event ${e.type}" style="--offset:${i * 1.26}"><time>${e.time}</time><div><strong>${escape(e.title)}</strong><small>${e.time} — ${e.end}</small>${e.id ? `<button class="icon-button event-delete" title="Delete Calendar event" aria-label="Delete ${escape(e.title)}" data-action="delete-calendar-event" data-event-id="${escape(e.id)}">×</button>` : ''}</div></div>`).join('')}</div><footer><button class="text-button" data-action="connect-google">${state.google.connected ? '↻ Refresh calendar' : state.google.sessionExpired ? 'Reconnect Google Calendar' : 'Connect Google Calendar'}</button><button class="text-button" data-action="open-google-calendar"><span class="action-arrow">↗</span>Open today</button><button class="text-button" data-action="create-event">＋ Create event</button></footer></section>
+      <section class="panel calendar ${state.visibility.calendar === false ? 'hidden-by-preference' : ''}" data-card-key="calendar" ${cardOrderStyle('calendar')}><header><div><p class="eyebrow">GOOGLE CALENDAR</p><h2>Day in motion</h2></div>${badge(state.google.connected ? 'connected' : state.google.sessionExpired ? 'reconnect' : 'not connected', state.google.connected ? 'exact' : 'estimated')}</header>${allDayEvents.length ? `<div class="all-day-events">${allDayEvents.map(e => `<div class="all-day-event"><span>All day</span><strong>${escape(e.title)}</strong>${e.id ? `<button class="icon-button event-delete" title="Delete Calendar event" aria-label="Delete ${escape(e.title)}" data-action="delete-calendar-event" data-event-id="${escape(e.id)}">×</button>` : ''}</div>`).join('')}</div>` : ''}<div class="timeline">${timedCalendarEvents.length ? timedCalendarEvents.map((e,i) => `<div class="event ${e.type}" style="--offset:${i * 1.26}"><time>${e.time}</time><div><strong>${escape(e.title)}</strong><small>${e.time} — ${e.end}</small>${e.id ? `<button class="icon-button event-delete" title="Delete Calendar event" aria-label="Delete ${escape(e.title)}" data-action="delete-calendar-event" data-event-id="${escape(e.id)}">×</button>` : ''}</div></div>`).join('') : '<p class="muted">Connect Google Calendar to show today’s events.</p>'}</div><footer><button class="text-button" data-action="connect-google">${state.google.connected ? '↻ Refresh calendar' : state.google.sessionExpired ? 'Reconnect Google Calendar' : 'Connect Google Calendar'}</button><button class="text-button" data-action="open-google-calendar"><span class="action-arrow">↗</span>Open today</button><button class="text-button" data-action="create-event">＋ Create event</button></footer></section>
       <section class="panel compact youtube-panel youtube-size-${escape(state.contentDisplay.youtubeSize)} ${state.visibility.youtube === false ? 'hidden-by-preference' : ''}" data-card-key="youtube" ${cardOrderStyle('youtube')}><header><div><p class="eyebrow">YOUTUBE</p><h2>${state.youtubeView === 'week' ? `${durationLabel(youtubeWeekTotal)} this week` : youtubeActiveVideos.length ? `${durationLabel(youtubeActiveSeconds)} today` : 'No activity yet'}</h2><small class="youtube-card-meta">${youtubeEntryCount} captured entr${youtubeEntryCount === 1 ? 'y' : 'ies'} · active tab time</small></div>${badge(youtubeStatusBadge, youtube.extensionLastSeen ? 'captured' : 'manual')}</header><div class="places-switch media-switch" role="tablist"><button class="${state.youtubeView === 'today' ? 'selected' : ''}" data-action="set-youtube-view" data-view="today">Today</button><button class="${state.youtubeView === 'week' ? 'selected' : ''}" data-action="set-youtube-view" data-view="week">This week</button></div><div class="youtube-filter" role="tablist" aria-label="Sort YouTube videos"><button class="${state.contentDisplay.youtubeSort === 'duration' ? 'selected' : ''}" data-action="set-youtube-sort" data-sort="duration">By duration</button><button class="${state.contentDisplay.youtubeSort === 'time' ? 'selected' : ''}" data-action="set-youtube-sort" data-sort="time">By time</button></div>${state.youtubeView === 'week' ? youtubeWeekContent : ''}<div class="video-list youtube-scroll">${videoRows}</div><footer><button class="text-button" data-action="youtube-setup">${youtubeActiveVideos.length || state.youtubeView === 'week' ? '↻ Refresh activity' : 'Check tracker'}</button></footer></section>
       <section class="panel compact spotify spotify-v2 ${state.visibility.spotify === false ? 'hidden-by-preference' : ''}" data-card-key="spotify" ${cardOrderStyle('spotify')}><header><div><p class="eyebrow">SPOTIFY</p><h2>${spotifyTitle}</h2><small class="youtube-card-meta">${spotifyMeta}</small></div>${badge(spotifyStatus, spotifyStatusKind)}</header><div class="spotify-now-v2">${spotifyArtwork}<div class="spotify-now-copy"><small>${currentTrack?.isPlaying ? 'Now playing' : 'Spotify'}</small><strong>${escape(spotifyNowTitle)}</strong><span>${escape(spotifyTrackMeta)}</span></div><button class="icon-button" data-action="connect-spotify">${spotify.connected ? '↻' : '↗'}</button></div>${spotifyConnectPrompt}${spotify.connected ? `${spotifyViewTabs}${spotifyRangeTabs}<div class="spotify-stat-list">${spotifyRows || `<p class="muted spotify-empty">No captured Spotify plays for this period yet. Keep Lifey open while listening, or refresh after Spotify has recent plays.</p>`}</div>` : ''}${spotify.endpointNotes?.length ? `<p class="spotify-limited">${escape(spotify.nowStatus || 'Some Spotify endpoints are unavailable, but local history still works when playback can be read.')}</p>` : ''}<footer><button class="text-button" data-action="connect-spotify">${spotify.connected ? '↻ Refresh Spotify' : 'Connect Spotify'}</button>${spotify.connected ? '<button class="text-button" data-action="reconnect-spotify">↗ Reconnect</button>' : ''}<button class="text-button" data-action="diagnose-spotify">Diagnose</button></footer></section>
       <section class="panel suggestions ${state.visibility.suggestions === false ? 'hidden-by-preference' : ''}" data-card-key="suggestions" ${cardOrderStyle('suggestions')}><header><div><p class="eyebrow">A LITTLE INSPIRATION</p><h2>Inspiration for today</h2></div></header><div class="suggestion-list">${contentSuggestions.map((s,i) => `<article><span class="number">${String(i + 1).padStart(2, '0')}</span><div><small>${escape(s.source)} · ${s.time}</small><h3>${escape(s.title)}</h3><p>${escape(s.why)}</p></div><button class="save" title="${s.url ? 'Open in Gmail' : 'Source link unavailable'}" data-action="open-suggestion" data-url="${escape(s.url || '')}">↗</button></article>`).join('')}</div><footer><button class="text-button" data-action="connect-gmail">${state.gmail.connected ? '↻ Refresh Gmail' : 'Connect Gmail'}</button></footer></section>
-      <section class="panel places ${state.visibility.places === false ? 'hidden-by-preference' : ''}" data-card-key="places" ${cardOrderStyle('places')}><header><div><p class="eyebrow">PLACES</p><h2>Where the day went</h2></div>${badge(state.traccar.connected ? (state.traccar.source || 'locations') : 'manual + import', state.traccar.connected ? 'exact' : 'manual')}</header><div class="places-switch" role="tablist"><button class="${state.locationView === 'today' ? 'selected' : ''}" data-action="set-location-view" data-view="today">Today</button><button class="${state.locationView === 'week' ? 'selected' : ''}" data-action="set-location-view" data-view="week">This week</button></div>${state.locationView === 'week' ? weekContent : `<div class="place-list">${placeData.map((place, index) => placeRow(place, index, true)).join('')}</div>`}<footer><button class="text-button" data-action="refresh-traccar">${state.traccar.connected ? '↻ Refresh locations' : 'Load locations'}</button>${state.locationView === 'today' && state.traccar.connected ? (placeMergeMode ? `<button class="text-button" data-action="confirm-place-merge">Merge ${placeMergeSelection.length || ''}</button><button class="text-button" data-action="cancel-place-merge">Cancel</button>` : '<button class="text-button" data-action="start-place-merge">Merge places</button>') : ''}<button class="text-button" data-action="archive-location-menu">Archive…</button><span>Durations approximate</span></footer></section>
-    </div>
-  </div>`;
+      <section class="panel places ${state.visibility.places === false ? 'hidden-by-preference' : ''}" data-card-key="places" ${cardOrderStyle('places')}><header><div><p class="eyebrow">PLACES</p><h2>Where the day went</h2></div>${badge(state.traccar.connected ? (state.traccar.source || 'locations') : 'manual + import', state.traccar.connected ? 'exact' : 'manual')}</header><div class="places-switch" role="tablist"><button class="${state.locationView === 'today' ? 'selected' : ''}" data-action="set-location-view" data-view="today">Today</button><button class="${state.locationView === 'week' ? 'selected' : ''}" data-action="set-location-view" data-view="week">This week</button></div>${state.locationView === 'week' ? weekContent : `<div class="place-list">${placeData.map((place, index) => placeRow(place, index, true)).join('')}</div>`}<footer><button class="text-button" data-action="refresh-location">${state.traccar.connected ? '↻ Refresh locations' : 'Load locations'}</button>${state.locationView === 'today' && state.traccar.connected ? (placeMergeMode ? `<button class="text-button" data-action="confirm-place-merge">Merge ${placeMergeSelection.length || ''}</button><button class="text-button" data-action="cancel-place-merge">Cancel</button>` : '<button class="text-button" data-action="start-place-merge">Merge places</button>') : ''}<button class="text-button" data-action="archive-location-menu">Archive…</button><span>Durations approximate</span></footer></section>
+    `;
   arrangeDashboardCards();
 }
 function modal(title, content, action = 'close', options = {}) { const el = options.layer === 'sub' ? (document.querySelector('#submodal') || document.body.appendChild(Object.assign(document.createElement('dialog'), { id: 'submodal' }))) : document.querySelector('#modal'); const confirmLabel = action === 'save-quick-task' ? 'Add task' : 'Confirm'; el.classList.toggle('submodal', options.layer === 'sub'); el.innerHTML = `<button class="close" data-action="close">×</button><p class="eyebrow">QUICK ACTION</p><h2>${title}</h2>${content}<div class="modal-actions"><button class="button ghost" data-action="close">Cancel</button><button class="button" data-action="${action}">${confirmLabel}</button></div>`; if (!el.open) el.showModal(); }
@@ -969,13 +821,6 @@ async function findJournalDailyFile(root) {
   }
   return findTodayFile(root);
 }
-function parseTasks(markdown, source) {
-  const lines = markdown.split('\n');
-  const habitStart = lines.findIndex(line => /^(?:#{1,6}\s*)?Habits::\s*$/i.test(line.trim()));
-  const habitEnd = habitStart < 0 ? -1 : lines.findIndex((line, index) => index > habitStart && /^#{1,6}\s+/.test(line));
-  const inHabitSection = index => habitStart >= 0 && index > habitStart && (habitEnd < 0 || index < habitEnd);
-  return lines.flatMap((line, index) => { if (inHabitSection(index)) return []; const match = line.match(/^\s*-\s+\[([ xX])\]\s+(.+)/); if (!match) return []; const mapping = state.taskMappings[`${source}:${index + 1}`] || {}; return [{ id: `obs-${source}-${index}`, text: match[2].trim(), source, line: index + 1, done: match[1].toLowerCase() === 'x', notion: Boolean(mapping.notionPageId), notionPageId: mapping.notionPageId || '', notionUrl: mapping.notionUrl || '', calendar: Boolean(mapping.calendarEventId), calendarEventId: mapping.calendarEventId || '' }]; });
-}
 async function connectVault() {
   if (state.localVaultPath) { try { await loadLocalVault(); return; } catch { state.localVaultPath = ''; persist(); } }
   if (!window.showDirectoryPicker) { selectDailyNote(); return; }
@@ -983,13 +828,13 @@ async function connectVault() {
   const current = await findJournalDailyFile(vaultHandle);
   if (!current) { toast(`No ${todayJournalDate()}.md was found. Select the note directly instead.`); selectDailyNote(); return; }
   const markdown = await (await current.handle.getFile()).text();
-  const tasks = parseTasks(markdown, current.path);
+  const tasks = parseTasks(markdown, current.path, state.taskMappings);
   if (tasks.length) { state.tasks = tasks; persist(); render(); }
   toast(`Read ${tasks.length} task(s) from ${current.path}.`);
 }
 function selectDailyNote() {
   const input = document.createElement('input'); input.type = 'file'; input.accept = '.md,text/markdown';
-  input.addEventListener('change', async () => { const file = input.files?.[0]; if (!file) return; const markdown = await file.text(); selectedDailyNote = { name: file.name, markdown }; const tasks = parseTasks(markdown, file.name); if (tasks.length) { state.tasks = tasks; persist(); render(); } toast(`Read ${tasks.length} task(s) from ${file.name}.`); }); input.click();
+  input.addEventListener('change', async () => { const file = input.files?.[0]; if (!file) return; const markdown = await file.text(); selectedDailyNote = { name: file.name, markdown }; const tasks = parseTasks(markdown, file.name, state.taskMappings); if (tasks.length) { state.tasks = tasks; persist(); render(); } toast(`Read ${tasks.length} task(s) from ${file.name}.`); }); input.click();
 }
 function downloadText(filename, text) { const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob([text], { type: 'text/markdown' })); link.download = filename; document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(link.href), 1000); }
 function normaliseArchiveTemplate(template) { return String(template || DEFAULT_ARCHIVE_TEMPLATE).replaceAll(LEGACY_ARCHIVE_START, ARCHIVE_MARKER).replaceAll(LEGACY_ARCHIVE_END, ARCHIVE_MARKER).replace(/^\s*- Instagram:.*(?:\r?\n)?/gmi, ''); }
@@ -1011,7 +856,7 @@ async function writeArchive() {
   const backupHandle = await current.parent.getFileHandle(`${todayIso()}.dashboard-backup-${Date.now()}.md`, { create: true });
   const backupWrite = await backupHandle.createWritable(); await backupWrite.write(previous); await backupWrite.close();
   const writable = await current.handle.createWritable(); await writable.write(updated); await writable.close();
-  toast('Daily archive written; the existing note was preserved outside dashboard markers.');
+  toast('Daily archive written; the existing note was preserved outside Lifey markers.');
 }
 async function toggleTask(task) {
   const completed = !task.done;
@@ -1027,7 +872,7 @@ async function toggleTask(task) {
   task.done = completed; persist(); render(); toast(completed ? 'Task completed in Obsidian.' : 'Task reopened in Obsidian.');
 }
 function placeWikiLink(name) { const safe = String(name || 'Unknown place').replaceAll('"', "'").replaceAll(']]', '').trim(); return `[[Place - "${safe}"]]`; }
-function archiveMarkdown() { const places = state.traccar.connected ? state.traccar.places : state.places; const values = { date: todayJournalDatePadded(), notionTasks: state.tasks.filter(t => t.notion).length, calendarTasks: state.tasks.filter(t => t.calendar).length, youtubeTime: durationLabel(state.youtube.totalActiveSeconds || 0), spotifyTime: durationLabel((spotifyStats('today').minutes || 0) * 60), places: places.length ? places.map(p => `- ${placeWikiLink(p.name)} · ${p.time || placeTiming(p).range} (${p.source})`).join('\n') : '- No places recorded' }; return applyArchiveTitle(normaliseArchiveTemplate(state.archiveTemplate), 'daily').replace(/\{\{(\w+)\}\}/g, (match, key) => values[key] ?? match); }
+function archiveMarkdown() { const places = state.traccar.connected ? state.traccar.places : state.places; const values = { date: todayJournalDatePadded(), notionTasks: state.tasks.filter(t => t.notion).length, calendarTasks: state.tasks.filter(t => t.calendar).length, youtubeTime: durationLabel(state.youtube.totalActiveSeconds || 0), spotifyTime: durationLabel((spotifyStats(state.spotify, 'today').minutes || 0) * 60), places: places.length ? places.map(p => `- ${placeWikiLink(p.name)} · ${p.time || placeTiming(p).range} (${p.source})`).join('\n') : '- No places recorded' }; return applyArchiveTitle(normaliseArchiveTemplate(state.archiveTemplate), 'daily').replace(/\{\{(\w+)\}\}/g, (match, key) => values[key] ?? match); }
 function integrationForm(name) {
   const value = state.integrations[name] || {};
   const forms = {
@@ -1052,7 +897,32 @@ async function saveIntegration(name) {
   if (shouldRestoreSettings) rerenderPreferences(tab, scrollTop);
   toast(saved.token || saved.clientId || saved.query ? `${name === 'google' ? 'Google' : name[0].toUpperCase()+name.slice(1)} settings saved locally.` : 'Nothing saved yet.');
 }
-document.addEventListener('click', e => { const b = e.target.closest('[data-action]'); if (!b) return; const { action, id } = b.dataset; const task = state.tasks.find(t => t.id === id);
+const captureController = {
+  quickCaptureModal, loadPlaceLabels, renderCapturePlaceDropdown, saveQuickCapture, closeCaptureSubmenus,
+  setCaptureMenuOpen, renderCaptureCalendar, renderCaptureOptionDropdown, selectCaptureOption,
+  refocusCaptureInput, ensureCapturePlaceContext, selectCapturePlace, refreshQuickCapturePreview,
+  toast, moveCapturePlaceSelection, selectedCapturePlaceName
+};
+const locationController = {
+  state, persist, render, toast, modal, escape, showPlacePoints, savePlaceLabel, loadLocationData,
+  setPlaceMergeMode: value => { placeMergeMode = value; },
+  setPlaceMergeSelection: value => { placeMergeSelection = value; },
+  placeMergeSelection: () => placeMergeSelection,
+  createPlaceMerge, undoPlaceMerge, openPreferences, todayIso, archiveLocationPeriod
+};
+const projectController = {
+  state, persist, render, toast, loadProjects, quickCaptureModal, openProjectNote, createProjectNote, updateProjectTask
+};
+const preferenceController = {
+  state, persist, render, toast, openPreferences, preferencesScrollTop, rerenderPreferences, applyAppearance,
+  saveDashboardBackgroundImage, exportProfile, importProfileFile, importProfile, DEFAULT_HABIT_SETTINGS,
+  timeToMinutes, saveLocationRadius, loadLocationData
+};
+document.addEventListener('click', e => { const b = actionTarget(e); if (!b) return; const { action, id } = actionPayload(b); const task = state.tasks.find(t => t.id === id);
+  if (handleCaptureAction(action, b, captureController)) return;
+  if (handleLocationAction(action, b, locationController)) return;
+  if (handleProjectAction(action, b, projectController)) return;
+  if (handlePreferenceAction(action, b, preferenceController)) return;
   if(action === 'toggle-task') toggleTask(task).catch(error => toast(error.message));
   if(action === 'delete-task') { const hadExternalRecord = Boolean(task?.calendarEventId || task?.notionPageId); deleteLocalTask(task).then(async () => { delete state.taskMappings[taskMappingKey(task)]; persist(); await loadLocalVault(true); toast(hadExternalRecord ? 'Task deleted from Obsidian; its external record was kept.' : 'Task deleted from Obsidian.'); }).catch(error => toast(error.message)); }
   if(action === 'notion') sendTaskToNotion(task).catch(error => toast(error.message));
@@ -1064,66 +934,10 @@ document.addEventListener('click', e => { const b = e.target.closest('[data-acti
   if(action === 'create-event') { const t = state.tasks.find(t => !t.calendar && !t.done); if (t) scheduleTaskFromMetadata(t).catch(error => toast(error.message)); }
   if(action === 'open-google-calendar') window.open(`https://calendar.google.com/calendar/u/0/r/day/${todayIso().replaceAll('-', '/')}`, '_blank', 'noopener');
   if(action === 'open-suggestion') { if (b.dataset.url) window.open(b.dataset.url, '_blank', 'noopener'); else toast('This suggestion does not have a direct source link yet.'); }
-  if(action === 'archive') { modal('Archive preview', `<pre>${escape(archiveMarkdown())}</pre><p class="modal-copy">Chromium writes only between dashboard markers and creates a backup. Firefox/Zen downloads an updated note plus a backup for you to replace in Obsidian.</p>`, 'write-archive'); }
+  if(action === 'archive') { modal('Archive preview', `<pre>${escape(archiveMarkdown())}</pre><p class="modal-copy">Chromium writes only between Lifey markers and creates a backup. Firefox/Zen downloads an updated note plus a backup for you to replace in Obsidian.</p>`, 'write-archive'); }
   if(action === 'write-archive') { document.querySelector('#modal').close(); writeArchive().catch(() => toast('Could not write the archive. Check vault permission.')); }
-  if(action === 'quick-add') { quickCaptureModal(); loadPlaceLabels().then(() => renderCapturePlaceDropdown(false)).catch(() => {}); }
-  if(action === 'save-quick-task') saveQuickCapture().catch(error => toast(error.message));
-  if(action === 'open-capture-calendar') { const holder = document.querySelector('#capture-calendar'); if (holder?.innerHTML) { closeCaptureSubmenus(); return; } closeCaptureSubmenus(); setCaptureMenuOpen('calendar'); document.querySelector('#capture-task')?.blur(); window.captureCalendarMonth = document.querySelector('#capture-date')?.value ? new Date(`${document.querySelector('#capture-date').value}T12:00:00`) : new Date(); const currentTime = document.querySelector('#capture-time')?.value; window.captureClockMode = 'hour'; window.captureTimePeriod = currentTime && Number(currentTime.split(':')[0]) >= 12 ? 'pm' : 'am'; renderCaptureCalendar(); requestAnimationFrame(() => document.querySelector('#capture-calendar')?.scrollIntoView({ block: 'nearest' })); }
-  if(action === 'open-capture-options') renderCaptureOptionDropdown(b.dataset.menu);
-  if(action === 'select-capture-option') selectCaptureOption(b.dataset.menu, b.dataset.value || '');
-  if(action === 'open-capture-places') { const holder = document.querySelector('#capture-place-dropdown'); if (holder?.innerHTML && document.querySelector('[data-action="open-capture-places"]')?.classList.contains('is-open')) { closeCaptureSubmenus(); refocusCaptureInput(); return; } closeCaptureSubmenus(); setCaptureMenuOpen('place'); ensureCapturePlaceContext(); renderCapturePlaceDropdown(true, 'Loading saved places…'); loadPlaceLabels().then(() => { renderCapturePlaceDropdown(true, 'No saved places yet.'); setCaptureMenuOpen('place'); }).catch(error => { renderCapturePlaceDropdown(true, 'Could not refresh saved places.'); toast(error.message); }); refocusCaptureInput(); }
-  if(action === 'select-capture-place') selectCapturePlace(b.dataset.placeName);
-  if(action === 'capture-calendar-prev') { window.captureCalendarMonth = new Date(window.captureCalendarMonth.getFullYear(), window.captureCalendarMonth.getMonth() - 1, 1); renderCaptureCalendar(); }
-  if(action === 'capture-calendar-next') { window.captureCalendarMonth = new Date(window.captureCalendarMonth.getFullYear(), window.captureCalendarMonth.getMonth() + 1, 1); renderCaptureCalendar(); }
-  if(action === 'capture-calendar-select') { const input = document.querySelector('#capture-date'); if (input) input.value = b.dataset.date; refreshQuickCapturePreview(); renderCaptureCalendar(); }
-  if(action === 'capture-clock-mode') { window.captureClockMode = b.dataset.mode; renderCaptureCalendar(); }
-  if(action === 'capture-clock-period') { window.captureTimePeriod = b.dataset.period; const input = document.querySelector('#capture-time'); if (input?.value) { let [hour, minute] = input.value.split(':').map(Number); hour = hour % 12 + (b.dataset.period === 'pm' ? 12 : 0); input.value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`; refreshQuickCapturePreview(); } renderCaptureCalendar(); }
-  if(action === 'capture-clock-select') { const input = document.querySelector('#capture-time'); const current = input?.value || '09:00'; let [hour, minute] = current.split(':').map(Number); if (window.captureClockMode === 'hour') { hour = Number(b.dataset.value) % 12 + (window.captureTimePeriod === 'pm' ? 12 : 0); window.captureClockMode = 'minute'; } else { minute = Number(b.dataset.value); window.captureClockMode = 'hour'; } if (input) input.value = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`; refreshQuickCapturePreview(); renderCaptureCalendar(); }
   if(action === 'import') modal('Import monitored accounts', '<p class="modal-copy">Paste handles, one per line. CSV and JSON imports belong in the local integration adapter.</p><textarea id="accounts-input" placeholder="@goodrestaurant\n@anotheraccount"></textarea>', 'save-accounts');
   if(action === 'save-accounts') { const list = document.querySelector('#accounts-input').value.match(/@?[a-zA-Z0-9._]+/g) || []; state.accounts.push(...list.map(h=>({handle:h.startsWith('@')?h:'@'+h,type:'Imported',freshness:'Unknown'}))); persist(); document.querySelector('#modal').close(); render(); toast(`${list.length} account(s) added locally.`); }
-  if(action === 'add-place') modal('Add a place', '<label>Place name<input id="place-name" placeholder="A place you visited" /></label><label>Time window<input id="place-time" placeholder="14:00–15:30" /></label>', 'save-place');
-  if(action === 'save-place') { const name=document.querySelector('#place-name').value; if(name){state.places.push({name,time:document.querySelector('#place-time').value || 'Today',source:'Manual'});persist();document.querySelector('#modal').close();render();toast('Place added as manual data.');} }
-  if(action === 'label-place') { const place = state.traccar.places[Number(b.dataset.placeIndex)]; if (!place) return; window.pendingPlaceLabel = place; modal('Name this place', `<p class="modal-copy">This name stays on your Mac and automatically applies whenever a location point is within <strong>50 metres</strong> of this spot.</p><label>Place name<input id="local-place-label" value="${escape(place.name)}" placeholder="e.g. Home, Studio, Gym" autofocus></label>`, 'save-place-label'); }
-  if(action === 'view-place-points') { const index = Number(b.dataset.placeIndex); const day = b.dataset.placeDate; const place = day ? state.traccar.week?.days?.find(item => item.date === day)?.places?.[index] : state.traccar.places[index]; if (place) showPlacePoints(place); }
-  if(action === 'open-place-map') { const latitude = Number(b.dataset.latitude), longitude = Number(b.dataset.longitude); if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return toast('Coordinates are unavailable for this place.'); window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${latitude},${longitude}`)}`, '_blank', 'noopener'); }
-  if(action === 'save-place-label') { const place = window.pendingPlaceLabel; const name = document.querySelector('#local-place-label')?.value.trim(); if (!place || !name) return toast('Enter a name for this place.'); document.querySelector('#modal').close(); savePlaceLabel(name, place.latitude, place.longitude).then(() => { state.osmPlaces.configured = false; persist(); toast(`Saved “${name}” for this location and nearby visits.`); return loadTraccar(); }).catch(error => toast(error.message)); }
-  if(action === 'start-place-merge') { placeMergeMode = true; placeMergeSelection = []; render(); }
-  if(action === 'cancel-place-merge') { placeMergeMode = false; placeMergeSelection = []; render(); }
-  if(action === 'toggle-place-merge') { const index = Number(b.dataset.placeIndex); placeMergeSelection = placeMergeSelection.includes(index) ? placeMergeSelection.filter(item => item !== index) : [...placeMergeSelection, index]; render(); }
-  if(action === 'confirm-place-merge') { const selected = placeMergeSelection.map(index => state.traccar.places[index]).filter(Boolean); if (selected.length < 2) return toast('Select at least two places to merge.'); const defaultName = [...new Set(selected.map(place => place.name))].join(' – ').slice(0, 120); window.pendingPlaceMerge = selected; modal('Merge places', `<p class="modal-copy">This creates one local place, preserves the old place notes as <code>-lifey-archive</code>, and can be undone in Settings → Location.</p><label>Merged place name<input id="merged-place-name" value="${escape(defaultName)}" autofocus></label>`, 'save-place-merge'); }
-  if(action === 'save-place-merge') { const name = document.querySelector('#merged-place-name')?.value.trim(); const selected = window.pendingPlaceMerge || []; if (!name) return toast('Give the merged place a name.'); document.querySelector('#modal').close(); createPlaceMerge(name, selected).then(async merge => { placeMergeMode = false; placeMergeSelection = []; await loadTraccar(); toast(`Merged ${selected.length} locations as “${merge.name}”.`); }).catch(error => toast(error.message)); }
-  if(action === 'undo-place-merge') { const mergeId = b.dataset.mergeId; undoPlaceMerge(mergeId).then(async result => { await loadTraccar(); openPreferences('location'); toast(`Undid “${result.name}”.`); }).catch(error => toast(error.message)); }
-  if(action === 'set-location-view') { state.locationView = b.dataset.view === 'week' ? 'week' : 'today'; if (state.locationView === 'week') state.locationWeekDay = todayIso(); persist(); render(); loadTraccar(state.locationView).catch(error => toast(error.message)); }
-  if(action === 'set-week-day') { state.locationWeekDay = b.dataset.date; persist(); render(); }
-  if(action === 'archive-location-menu') modal('Archive top places', '<p class="modal-copy">Create an editable location archive directly in Journals and update the top place notes for the selected period.</p><div class="location-archive-actions"><button class="button ghost" data-action="archive-location" data-period="weekly">Archive week</button><button class="button ghost" data-action="archive-location" data-period="monthly">Archive month</button><button class="button" data-action="archive-location" data-period="yearly">Archive year</button></div>', 'close');
-  if(action === 'archive-location') { document.querySelector('#modal').close(); archiveLocationPeriod(b.dataset.period).catch(error => toast(error.message)); }
-  if(action === 'settings') openPreferences();
-  if(action === 'preferences-tab') openPreferences(b.dataset.tab);
-  if(action === 'choose-background-image') document.querySelector('#dashboard-background-input')?.click();
-  if(action === 'remove-background-image') { const scrollTop = preferencesScrollTop(); state.appearance.backgroundImage = ''; applyAppearance(); persist(); rerenderPreferences('appearance', scrollTop); toast('Dashboard background image removed.'); }
-  if(action === 'export-profile') exportProfile().then(() => toast('Lifey profile exported without secrets.')).catch(error => toast(error.message));
-  if(action === 'import-profile') importProfileFile();
-  if(action === 'confirm-profile-import') { const bundle = window.pendingProfileImport; if (!bundle) return toast('Choose a Lifey profile file first.'); document.querySelector('#modal').close(); importProfile(bundle).then(() => { render(); openPreferences('profile'); toast('Profile imported. Reconnect private tokens on this Mac.'); }).catch(error => toast(error.message)); }
-  if(action === 'set-suggestion-count') { const scrollTop = preferencesScrollTop(); state.contentDisplay.limit = Number(b.dataset.count); persist(); rerenderPreferences('appearance', scrollTop); }
-  if(action === 'set-youtube-card-size') { const scrollTop = preferencesScrollTop(); state.contentDisplay.youtubeSize = ['small', 'medium', 'large'].includes(b.dataset.size) ? b.dataset.size : 'medium'; persist(); rerenderPreferences('appearance', scrollTop); }
-  if(action === 'add-habit-period') { const scrollTop = preferencesScrollTop(); state.habitSettings.periods = [...state.habitSettings.periods, { id: `period-${Date.now()}`, name: 'New period', start: '18:00', end: '23:59' }]; persist(); rerenderPreferences('habits', scrollTop); }
-  if(action === 'delete-habit-period') { const scrollTop = preferencesScrollTop(); state.habitSettings.periods = state.habitSettings.periods.filter((_, index) => index !== Number(b.dataset.index)); persist(); rerenderPreferences('habits', scrollTop); }
-  if(action === 'reset-habit-periods') { const scrollTop = preferencesScrollTop(); state.habitSettings = { timezone: state.habitSettings.timezone || DEFAULT_HABIT_SETTINGS.timezone, periods: DEFAULT_HABIT_SETTINGS.periods.map(period => ({ ...period })) }; persist(); rerenderPreferences('habits', scrollTop); toast('Habit periods reset.'); }
-  if(action === 'save-habit-settings') {
-    const timezone = document.querySelector('#habit-timezone')?.value.trim() || DEFAULT_HABIT_SETTINGS.timezone;
-    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format(new Date()); } catch { return toast('Use a valid timezone like America/Guayaquil.'); }
-    const rows = [...document.querySelectorAll('[data-habit-period-index]')];
-    const periods = rows.map((row, index) => {
-      const field = name => row.querySelector(`[data-habit-period-field="${name}"]`)?.value.trim();
-      return { id: state.habitSettings.periods[index]?.id || `period-${index + 1}`, name: field('name'), start: field('start'), end: field('end') };
-    });
-    if (!periods.length) return toast('Keep at least one habit period.');
-    if (periods.some(period => !period.name || timeToMinutes(period.start) === null || timeToMinutes(period.end) === null)) return toast('Each habit period needs a name, start time, and end time.');
-    state.habitSettings = { timezone, periods };
-    persist();
-    rerenderPreferences('habits', preferencesScrollTop());
-    toast('Habit time settings saved.');
-  }
   if(action === 'save-archive-settings') { const scrollTop = preferencesScrollTop(); const daily = normaliseArchiveTemplate(document.querySelector('#archive-default-daily')?.value.trim()); const templates = { weekly: document.querySelector('#archive-default-weekly')?.value.trim(), monthly: document.querySelector('#archive-default-monthly')?.value.trim(), yearly: document.querySelector('#archive-default-yearly')?.value.trim() }; const titles = { daily: document.querySelector('#archive-title-daily')?.value.trim(), weekly: document.querySelector('#archive-title-weekly')?.value.trim(), monthly: document.querySelector('#archive-title-monthly')?.value.trim(), yearly: document.querySelector('#archive-title-yearly')?.value.trim() }; if (!hasArchiveMarkers(daily) || Object.values(templates).some(template => !hasArchiveMarkers(template))) return toast('Keep --- as the first and last line of every archive default.'); if (Object.values(titles).some(title => !title)) return toast('Give every archive a title.'); Promise.all([saveArchiveTemplate(daily), saveLocationArchiveTemplates(templates), saveArchiveTitles(titles)]).then(([dailyResult]) => { openPreferences('archives', { scrollTop }); toast(dailyResult.localOnly ? 'Archive defaults saved in this browser. Restart Lifey once to sync them locally.' : 'Archive defaults saved.'); }).catch(error => toast(error.message)); }
   if(action === 'edit-archive-template') modal('Archive default', `<p class="modal-copy">Edit the Markdown Lifey writes every day. Keep one <code>---</code> on the first line and another on the last line. You can use <code>{{date}}</code>, <code>{{notionTasks}}</code>, <code>{{calendarTasks}}</code>, <code>{{youtubeTime}}</code>, <code>{{spotifyTime}}</code>, and <code>{{places}}</code>.</p><textarea id="archive-template">${escape(normaliseArchiveTemplate(state.archiveTemplate))}</textarea><button class="text-button" data-action="reset-archive-template">Reset to Lifey’s default</button><button class="text-button" data-action="edit-location-archive-templates">Edit weekly, monthly, and yearly defaults</button>`, 'save-archive-template');
   if(action === 'edit-location-archive-templates') modal('Location archive defaults', `<p class="modal-copy">These editable templates create reports directly inside Journals. Keep <code>---</code> as the first and final line. Use <code>{{period}}</code>, <code>{{topPlaces}}</code>, and, for weekly archives, <code>{{dailyPlaces}}</code>.</p><label>Weekly<textarea id="location-template-weekly">${escape(state.locationArchiveTemplates.weekly)}</textarea></label><label>Monthly<textarea id="location-template-monthly">${escape(state.locationArchiveTemplates.monthly)}</textarea></label><label>Yearly<textarea id="location-template-yearly">${escape(state.locationArchiveTemplates.yearly)}</textarea></label>`, 'save-location-archive-templates');
@@ -1152,21 +966,13 @@ document.addEventListener('click', e => { const b = e.target.closest('[data-acti
   if(action === 'save-local-vault') { const path = document.querySelector('#local-vault-path')?.value.trim(); if (!path) return toast('Enter the Daily notes folder path first.'); closeActiveDialog(); configureLocalVault(path).catch(error => toast(error.message)); }
   if(action === 'save-traccar') { const server = document.querySelector('#traccar-server')?.value.trim(), token = document.querySelector('#traccar-token')?.value.trim(), deviceId = document.querySelector('#traccar-device')?.value.trim(); closeActiveDialog(); configureTraccar(server, token, deviceId).catch(error => toast(error.message)); }
   if(action === 'save-google-places') { const key = document.querySelector('#google-places-key')?.value.trim(); closeActiveDialog(); configureGooglePlaces(key).then(() => { toast('Google place naming configured. Refresh locations.'); }).catch(error => toast(error.message)); }
-  if(action === 'refresh-traccar') loadTraccar(state.locationView).catch(error => toast(error.message || 'Set up Lifey Location or Traccar first.'));
   if(action === 'connect-spotify') connectSpotify().catch(error => toast(error.message));
   if(action === 'reconnect-spotify') reconnectSpotify().catch(error => toast(error.message));
   if(action === 'diagnose-spotify') diagnoseSpotify().catch(error => toast(error.message));
   if(action === 'set-spotify-view') { state.spotify.view = b.dataset.view === 'songs' ? 'songs' : 'artists'; persist(); render(); }
-  if(action === 'set-spotify-range') { state.spotify.range = ['today', 'week', 'month'].includes(b.dataset.range) ? b.dataset.range : 'today'; state.spotify.minutes = spotifyStats(state.spotify.range).minutes; persist(); render(); }
+  if(action === 'set-spotify-range') { state.spotify.range = ['today', 'week', 'month'].includes(b.dataset.range) ? b.dataset.range : 'today'; state.spotify.minutes = spotifyStats(state.spotify, state.spotify.range).minutes; persist(); render(); }
   if(action === 'connect-google') connectGoogleCalendar().catch(error => toast(error.message));
   if(action === 'connect-gmail') connectGmail().catch(error => toast(error.message));
-  if(action === 'refresh-projects') loadProjects().catch(error => toast(error.message));
-  if(action === 'open-project') { const slug = b.dataset.projectSlug; state.projects.expandedSlug = state.projects.expandedSlug === slug ? '' : slug; persist(); render(); }
-  if(action === 'project-capture') { const slug = b.dataset.projectSlug; document.querySelector('#modal')?.close(); quickCaptureModal(null, { projectSlug: slug }); }
-  if(action === 'open-project-note') openProjectNote(b.dataset.projectSlug).catch(error => toast(error.message));
-  if(action === 'create-project-note') createProjectNote(b.dataset.projectSlug, b.dataset.projectTitle).then(() => toast('Project note created from template.')).catch(error => toast(error.message));
-  if(action === 'toggle-project-task') { const task = { source: b.dataset.source, line: Number(b.dataset.line), raw: b.dataset.raw }; updateProjectTask(task, { completed: b.dataset.completed !== 'true' }).catch(error => toast(error.message)); }
-  if(action === 'edit-project-task') { const task = { source: b.dataset.source, line: Number(b.dataset.line), raw: b.dataset.raw, text: b.dataset.raw, projectTask: true }; window.editingProjectTask = task; document.querySelector('#modal')?.close(); quickCaptureModal(task, { projectSlug: b.dataset.projectSlug }); }
   if(action === 'toggle-habit') { const habit = { line: Number(b.dataset.line), habit: b.dataset.habit, state: b.dataset.state }; const nextState = habit.state === 'completed' ? 'pending' : 'completed'; if (nextState === 'completed') { window.justCompletedHabit = habit.habit; setTimeout(() => { if (window.justCompletedHabit === habit.habit) { window.justCompletedHabit = ''; render(); } }, 1300); } setHabitState(habit, nextState).catch(error => toast(error.message)); }
   if(action === 'skip-habit') { const habit = { line: Number(b.dataset.line), habit: b.dataset.habit, state: b.dataset.state }; setHabitState(habit, habit.state === 'skipped' ? 'pending' : 'skipped').catch(error => toast(error.message)); }
   if(action === 'set-habits-view') { state.habits.view = b.dataset.view || 'today'; persist(); render(); if (['calendar', 'graph', 'archived'].includes(state.habits.view)) loadHabitHistory(state.habits.range || 'month', true).catch(error => toast(error.message)); }
@@ -1202,27 +1008,23 @@ document.addEventListener('dragleave', e => { e.target.closest('[data-card-order
 document.addEventListener('dragend', () => { draggedCard = null; clearCardDragState(); });
 document.addEventListener('drop', e => { const target = e.target.closest('[data-card-order]'); if (!draggedCard || !target) return; e.preventDefault(); const scrollTop = preferencesScrollTop(); const sourceIndex = state.cardOrder.indexOf(draggedCard), targetIndex = state.cardOrder.indexOf(target.dataset.cardOrder); if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return; state.cardOrder.splice(sourceIndex, 1); state.cardOrder.splice(targetIndex, 0, draggedCard); persist(); draggedCard = null; rerenderPreferences('appearance', scrollTop); });
 document.addEventListener('change', e => {
-  const color = e.target.dataset.appearance;
-  if (color) { state.appearance[color] = e.target.value; applyAppearance(); persist(); const preview = e.target.parentElement.querySelector('span'); if (preview) preview.style.background = e.target.value; return; }
-  if (e.target.id === 'background-tint-intensity') { state.appearance.backgroundTintIntensity = Number(e.target.value); applyAppearance(); persist(); return; }
-  if (e.target.id === 'appearance-corner-radius') { state.appearance.cornerRadius = Math.max(8, Math.min(36, Number(e.target.value))); applyAppearance(); persist(); return; }
-  if (e.target.id === 'dashboard-background-input') { saveDashboardBackgroundImage(e.target.files?.[0]); return; }
-  if (['location-radius', 'location-radius-number'].includes(e.target.id)) { const scrollTop = preferencesScrollTop(); const radius = Number(e.target.value); if (!Number.isFinite(radius) || radius < 20 || radius > 500) return toast('Choose a distance from 20 to 500 metres.'); saveLocationRadius(radius).then(() => loadTraccar(state.locationView)).then(() => { openPreferences('location', { scrollTop }); toast(`Place grouping updated to ${radius} metres.`); }).catch(error => toast(error.message)); return; }
-  const visibility = e.target.dataset.visibility;
-  if (visibility) { const scrollTop = preferencesScrollTop(); state.visibility[visibility] = e.target.checked; persist(); rerenderPreferences('appearance', scrollTop); return; }
-  const heroMetric = e.target.dataset.heroMetricVisible;
-  if (heroMetric) { const scrollTop = preferencesScrollTop(); state.heroMetricVisibility[heroMetric] = e.target.checked; persist(); rerenderPreferences('appearance', scrollTop); return; }
-  const taskDisplay = e.target.dataset.taskDisplay;
-  if (taskDisplay) { const scrollTop = preferencesScrollTop(); state.taskDisplay[taskDisplay] = e.target.checked; persist(); rerenderPreferences('appearance', scrollTop); }
+  if (handlePreferenceChange(e, preferenceController)) return;
   if (['capture-date', 'capture-priority', 'capture-recurring'].includes(e.target.id)) refreshQuickCapturePreview();
 });
-document.addEventListener('input', e => { if (e.target.id === 'capture-task') { refreshQuickCapturePreview(); renderCapturePlaceDropdown(false); } if (e.target.id === 'location-radius') { const number = document.querySelector('#location-radius-number'); const output = document.querySelector('.location-radius output'); if (number) number.value = e.target.value; if (output) output.textContent = `${e.target.value} m`; } if (e.target.id === 'background-tint-intensity') { const output = e.target.closest('label')?.querySelector('output'); if (output) output.textContent = `${e.target.value}%`; state.appearance.backgroundTintIntensity = Number(e.target.value); applyAppearance(); } if (e.target.id === 'appearance-corner-radius') { const value = Math.max(8, Math.min(36, Number(e.target.value))); const output = e.target.closest('label')?.querySelector('output'); if (output) output.textContent = `${value}px`; state.appearance.cornerRadius = value; applyAppearance(); } });
-document.addEventListener('keydown', e => { if (e.target?.id === 'capture-task') { const holder = document.querySelector('#capture-place-dropdown'); const open = Boolean(holder?.querySelector('[data-place-name]')); if (e.key === 'ArrowDown' && open) { e.preventDefault(); moveCapturePlaceSelection(1); return; } if (e.key === 'ArrowUp' && open) { e.preventDefault(); moveCapturePlaceSelection(-1); return; } if (e.key === 'Enter' && open && selectedCapturePlaceName()) { e.preventDefault(); selectCapturePlace(selectedCapturePlaceName()); return; } if (e.key === 'Escape' && holder?.innerHTML) { closeCaptureSubmenus(); e.preventDefault(); return; } } if ((e.metaKey || e.ctrlKey) && e.key === '.') { e.preventDefault(); document.querySelector('[data-action="settings"]').click(); } if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); document.querySelector('[data-action="quick-add"]').click(); } });
+document.addEventListener('input', e => {
+  if (handleCaptureInput(e, captureController)) return;
+  if (handlePreferenceInput(e, preferenceController)) return;
+});
+document.addEventListener('keydown', e => {
+  if (handleCaptureKeydown(e, captureController)) return;
+  if ((e.metaKey || e.ctrlKey) && e.key === '.') { e.preventDefault(); document.querySelector('[data-action="settings"]').click(); }
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); document.querySelector('[data-action="quick-add"]').click(); }
+});
 window.addEventListener('resize', () => { clearTimeout(window.cardLayoutResizeTimer); window.cardLayoutResizeTimer = setTimeout(arrangeDashboardCards, 120); });
 render();
 scheduleGoogleExpiry();
 finishSpotifyAuth().catch(error => { history.replaceState({}, '', window.location.pathname); toast(error.message); });
-checkLocalHelper().then(async () => { const [notion, googlePlaces, osmPlaces, mobileLocation, googleStatus, placeLabels] = await Promise.all([localRequest('/api/notion/status'), localRequest('/api/google-places/status'), localRequest('/api/osm-places/status'), localRequest('/api/location/mobile/status'), loadGoogleStatus(), loadPlaceLabels().catch(() => [])]); state.notion.configured = Boolean(notion.configured); state.googlePlaces.configured = Boolean(googlePlaces.configured); state.osmPlaces.configured = Boolean(osmPlaces.configured); state.mobileLocation = { configured: Boolean(mobileLocation.configured), samples: mobileLocation.samples || 0, latest: mobileLocation.latest || '' }; state.placeLabels = placeLabels || state.placeLabels || []; persist(); render(); loadProjects(true).catch(() => {}); loadHabitsToday(true).catch(() => {}); loadHabitHistory(state.habits.range || 'month', true).catch(() => {}); if (googleStatus.connected) loadGoogleCalendar().catch(() => {}); if (mobileLocation.samples) loadTraccar(state.locationView).catch(() => {}); }).catch(() => {});
+checkLocalHelper().then(async () => { const [notion, googlePlaces, osmPlaces, mobileLocation, googleStatus, placeLabels] = await Promise.all([localRequest('/api/notion/status'), localRequest('/api/google-places/status'), localRequest('/api/osm-places/status'), localRequest('/api/location/mobile/status'), loadGoogleStatus(), loadPlaceLabels().catch(() => [])]); state.notion.configured = Boolean(notion.configured); state.googlePlaces.configured = Boolean(googlePlaces.configured); state.osmPlaces.configured = Boolean(osmPlaces.configured); state.mobileLocation = { configured: Boolean(mobileLocation.configured), samples: mobileLocation.samples || 0, latest: mobileLocation.latest || '' }; state.placeLabels = placeLabels || state.placeLabels || []; persist(); render(); loadProjects(true).catch(() => {}); loadHabitsToday(true).catch(() => {}); loadHabitHistory(state.habits.range || 'month', true).catch(() => {}); if (googleStatus.connected) loadGoogleCalendar().catch(() => {}); if (mobileLocation.samples) loadLocationData(state.locationView).catch(() => {}); }).catch(() => {});
 loadYoutube(true).catch(() => {});
 if (state.spotify.accessToken) {
   loadSpotify({ quiet: true }).catch(() => {});

@@ -1,9 +1,15 @@
 {
-  "name": "today-command-center",
+  "name": "lifey",
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "assets:version": "node scripts/sync-asset-version.mjs",
+    "check:assets": "node scripts/sync-asset-version.mjs --check",
+    "prestart": "npm run assets:version",
     "start": "python3 local_server.py",
-    "start:lan": "LIFEY_LAN=1 python3 local_server.py"
+    "prestart:lan": "npm run assets:version",
+    "start:lan": "LIFEY_LAN=1 python3 local_server.py",
+    "test": "python3 -m unittest discover -s tests",
+    "check": "npm run check:assets && node --check app.js && python3 -m py_compile local_server.py && npm test"
   }
 }

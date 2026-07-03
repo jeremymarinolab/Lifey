@@ -1,5 +1,38 @@
-const CACHE = 'lifey-shell-v114';
-const SHELL = ['./', './index.html', './styles.css', './mobile.css', './preferences.css', './preferences-extra.css', './capture.css', './capture-calendar.css', './capture-override.css', './card-layout.css', './app.js', './manifest.webmanifest', './lifey-icon.svg'];
+const CACHE = 'lifey-shell-v4aff4eb9ffe0';
+const SHELL = [
+  './',
+  './index.html',
+  './manifest.webmanifest',
+  './styles.css',
+  './preferences.css',
+  './capture.css',
+  './capture-calendar.css',
+  './dashboard-layout.css',
+  './task-card.css',
+  './spotify-card.css',
+  './settings-panels.css',
+  './projects-card.css',
+  './media-card.css',
+  './habits-card.css',
+  './location-card.css',
+  './calendar-card.css',
+  './mobile.css',
+  './app.js',
+  './js/actions.js',
+  './js/api.js',
+  './js/features/capture/capture.js',
+  './js/features/capture/controller.js',
+  './js/features/habits/habits.js',
+  './js/features/location/controller.js',
+  './js/features/location/location.js',
+  './js/features/preferences/controller.js',
+  './js/features/projects/controller.js',
+  './js/integrations/spotify.js',
+  './js/parsers.js',
+  './js/renderers.js',
+  './js/state.js',
+  './lifey-icon.svg'
+];
 
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(

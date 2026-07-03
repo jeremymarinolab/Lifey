@@ -1,0 +1,67 @@
+.panel > header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+    box-sizing: border-box;
+    min-height: 83px;
+    padding: 20px 20px 15px;
+}
+.all-day-events {
+    display: grid;
+    gap: 6px;
+    padding: 0 20px 12px;
+    border-bottom: 1px solid rgba(230, 245, 237, .09);
+}
+.all-day-event {
+    position: relative;
+    display: grid;
+    grid-template-columns: 45px minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+    min-height: 30px;
+    padding: 6px 36px 6px 0;
+}
+.all-day-event::before {
+    content: "";
+    grid-column: 2;
+    grid-row: 1;
+    height: 100%;
+    min-height: 26px;
+    border-radius: 7px;
+    background: linear-gradient(90deg, rgba(200, 208, 208, .22), rgba(200, 208, 208, .09));
+    border-left: 2px solid var(--calendar);
+}
+.all-day-event span {
+    grid-column: 1;
+    grid-row: 1;
+    color: var(--muted);
+    font: 9px 'DM Mono';
+    text-transform: uppercase;
+    letter-spacing: .02em;
+}
+.all-day-event strong {
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding: 0 10px;
+    font-size: 12px;
+    z-index: 1;
+}
+.event > div {
+   position: relative;
+   padding-right: 34px;
+}
+.event-delete {
+    position: absolute;
+    top: 7px;
+    right: 7px;
+}
+.event-delete:hover, .task-delete:hover {
+   border-color: rgba(255, 145, 124, .52);
+   background: rgba(255, 110, 85, .16);
+   color: #ffc2b5;
+}
