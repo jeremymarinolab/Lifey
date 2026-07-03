@@ -7,6 +7,17 @@
   "background_color": "#2F383E",
   "theme_color": "#2F383E",
   "icons": [
-    { "src": "./lifey-icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+    {
+      "src": "./LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-60@3x.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-1024.png",
+      "sizes": "1024x1024",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
   ]
 }

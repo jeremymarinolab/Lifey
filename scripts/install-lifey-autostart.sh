@@ -14,4 +14,6 @@ cp "$ROOT/$LABEL.plist" "$TARGET"
 /bin/launchctl kickstart -k "$DOMAIN/$LABEL"
 
 echo "Lifey will now start automatically whenever you log in."
-echo "Open http://127.0.0.1:4173 once the server is ready."
+echo "On this Mac: http://127.0.0.1:4173"
+echo "On iPhone over the same Wi-Fi: http://YOUR-MAC-WIFI-IP:4173"
+echo "Tailscale is optional fallback only; Lifey no longer requires it."

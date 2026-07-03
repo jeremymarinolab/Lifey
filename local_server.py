@@ -7,9 +7,12 @@ DASHBOARD marker block while saving a sibling backup. It never listens beyond
 """
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import gzip
+import hashlib
 import json
+import os
 import re
 import secrets
 import ssl
@@ -20,7 +23,7 @@ import zlib
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 from urllib import error as urlerror
 from urllib import request as urlrequest
 
@@ -44,8 +47,21 @@ DEFAULT_ARCHIVE_TITLES = {
     "monthly": "Lifey · {{period}}",
     "yearly": "Lifey · {{period}}",
 }
-SECRET_FIELDS = {"notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken"}
+SECRET_FIELDS = {"notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleRefreshToken", "googleClientSecret"}
 KEYCHAIN_SERVICE = "Lifey"
+PROFILE_PREFERENCE_FIELDS = {"appearance", "visibility", "taskDisplay", "contentDisplay", "heroMetricOrder", "heroMetricVisibility", "cardOrder", "integrations", "habitSettings"}
+PROFILE_SECRET_KEYS = {"token", "accessToken", "refreshToken", "notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleClientSecret", "clientSecret", "password", "secret"}
+PROFILE_EXCLUDED_SECRETS = [
+    "notionToken",
+    "googlePlacesKey",
+    "traccarToken",
+    "lifeyLocationToken",
+    "googleRefreshToken",
+    "googleClientSecret",
+    "oauthAccessTokens",
+]
+GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.readonly"
+GOOGLE_REDIRECT_URI = "http://127.0.0.1:4173/api/google/auth/callback"
 
 
 def keychain_get(name: str) -> str:
@@ -72,6 +88,14 @@ def keychain_set(name: str, value: str) -> bool:
         return False
 
 
+def keychain_delete(name: str) -> bool:
+    try:
+        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name], capture_output=True, text=True, timeout=3, check=False)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def config() -> dict:
     try:
         settings = json.loads((CONFIG if CONFIG.exists() else LEGACY_CONFIG).read_text())
@@ -91,7 +115,10 @@ def save_config(values: dict) -> None:
     persisted = dict(current)
     for key in SECRET_FIELDS:
         value = str(current.get(key) or "")
-        if value and keychain_set(key, value):
+        if key in values and not value:
+            keychain_delete(key)
+            persisted.pop(key, None)
+        elif value and keychain_set(key, value):
             persisted.pop(key, None)
     CONFIG.parent.mkdir(parents=True, exist_ok=True)
     CONFIG.write_text(json.dumps(persisted, indent=2))
@@ -104,6 +131,133 @@ def save_config(values: dict) -> None:
             LEGACY_CONFIG.write_text(json.dumps(legacy, indent=2))
         except (OSError, json.JSONDecodeError):
             pass
+
+
+def strip_profile_secrets(value):
+    if isinstance(value, dict):
+        return {key: strip_profile_secrets(item) for key, item in value.items() if key not in PROFILE_SECRET_KEYS}
+    if isinstance(value, list):
+        return [strip_profile_secrets(item) for item in value]
+    return value
+
+
+def safe_profile_preferences(settings: dict) -> dict:
+    preferences = settings.get("profilePreferences", {})
+    if not isinstance(preferences, dict):
+        preferences = {}
+    clean = {key: preferences[key] for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
+    integrations = strip_profile_secrets(dict(clean.get("integrations", {}))) if isinstance(clean.get("integrations"), dict) else {}
+    if settings.get("notionParentId"):
+        notion = dict(integrations.get("notion", {})) if isinstance(integrations.get("notion"), dict) else {}
+        notion.setdefault("database", settings.get("notionParentId", ""))
+        notion.setdefault("dataSourceId", settings.get("notionDataSourceId", ""))
+        notion.setdefault("property", settings.get("notionTitleProperty", "Name"))
+        integrations["notion"] = strip_profile_secrets(notion)
+    if settings.get("traccarServer") or settings.get("traccarDeviceId"):
+        traccar = dict(integrations.get("traccar", {})) if isinstance(integrations.get("traccar"), dict) else {}
+        traccar.setdefault("server", settings.get("traccarServer", ""))
+        traccar.setdefault("deviceId", settings.get("traccarDeviceId", ""))
+        integrations["traccar"] = strip_profile_secrets(traccar)
+    if settings.get("googleClientId") or settings.get("googleCalendarId"):
+        google = dict(integrations.get("google", {})) if isinstance(integrations.get("google"), dict) else {}
+        google.setdefault("clientId", settings.get("googleClientId", ""))
+        google.setdefault("calendar", settings.get("googleCalendarId", "primary"))
+        integrations["google"] = strip_profile_secrets(google)
+    if settings.get("gmailQuery"):
+        gmail = dict(integrations.get("gmail", {})) if isinstance(integrations.get("gmail"), dict) else {}
+        gmail.setdefault("query", settings.get("gmailQuery", ""))
+        integrations["gmail"] = strip_profile_secrets(gmail)
+    if integrations:
+        clean["integrations"] = integrations
+    return strip_profile_secrets(clean)
+
+
+def profile_export_bundle() -> dict:
+    settings = config()
+    return {
+        "version": 1,
+        "app": "Lifey",
+        "exportedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "profile": {
+            "preferences": safe_profile_preferences(settings),
+            "archiveTemplate": settings.get("archiveTemplate", ""),
+            "locationArchiveTemplates": archive_templates(),
+            "archiveTitles": archive_titles(),
+            "obsidian": {"dailyNotesPath": settings.get("dailyNotesPath", "")},
+            "location": {
+                "radiusMeters": grouping_radius(),
+                "localPlaceLabels": settings.get("localPlaceLabels", []),
+                "placeMerges": settings.get("placeMerges", []),
+                "osmPlacesEnabled": bool(settings.get("osmPlacesEnabled")),
+            },
+        },
+        "excludedSecrets": PROFILE_EXCLUDED_SECRETS,
+    }
+
+
+def clean_profile_import(body: dict) -> dict:
+    profile = body.get("profile", body) if isinstance(body, dict) else {}
+    if not isinstance(profile, dict):
+        raise ValueError("Invalid Lifey profile.")
+    updates: dict = {}
+    preferences = profile.get("preferences", {})
+    if not isinstance(preferences, dict):
+        preferences = {}
+    clean_preferences = {key: strip_profile_secrets(preferences[key]) for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
+    if clean_preferences:
+        updates["profilePreferences"] = clean_preferences
+    archive_template = str(profile.get("archiveTemplate", "") or "").strip()
+    if archive_template:
+        if len(archive_template) > 20_000 or not has_archive_markers(archive_template):
+            raise ValueError("The daily archive template must begin and end with ---.")
+        updates["archiveTemplate"] = archive_template
+    location_templates = profile.get("locationArchiveTemplates")
+    if isinstance(location_templates, dict):
+        merged = {key: str(location_templates.get(key) or DEFAULT_LOCATION_ARCHIVE_TEMPLATES[key]).strip() for key in DEFAULT_LOCATION_ARCHIVE_TEMPLATES}
+        if any(not has_archive_markers(template) for template in merged.values()):
+            raise ValueError("Each location archive template must begin and end with ---.")
+        updates["locationArchiveTemplates"] = merged
+    titles = profile.get("archiveTitles")
+    if isinstance(titles, dict):
+        merged_titles = {key: str(titles.get(key) or DEFAULT_ARCHIVE_TITLES[key]).strip()[:160] for key in DEFAULT_ARCHIVE_TITLES}
+        if any(not value for value in merged_titles.values()):
+            raise ValueError("Every archive needs a title.")
+        updates["archiveTitles"] = merged_titles
+    obsidian = profile.get("obsidian")
+    if isinstance(obsidian, dict):
+        daily_path = str(obsidian.get("dailyNotesPath", "") or "").strip()
+        if daily_path:
+            updates["dailyNotesPath"] = daily_path[:2000]
+    location = profile.get("location")
+    if isinstance(location, dict):
+        if "radiusMeters" in location:
+            radius = int(location.get("radiusMeters", 50))
+            if not 20 <= radius <= 500:
+                raise ValueError("Location radius must be between 20 and 500 metres.")
+            updates["placeGroupingRadiusMeters"] = radius
+        labels = location.get("localPlaceLabels")
+        if isinstance(labels, list):
+            clean_labels = []
+            for label in labels[:500]:
+                if not isinstance(label, dict):
+                    continue
+                name = str(label.get("name", "")).strip()[:120]
+                try:
+                    latitude, longitude = float(label.get("latitude")), float(label.get("longitude"))
+                    radius = int(label.get("radiusMeters", 50))
+                except (TypeError, ValueError):
+                    continue
+                if name and -90 <= latitude <= 90 and -180 <= longitude <= 180:
+                    clean_labels.append({"name": name, "latitude": latitude, "longitude": longitude, "radiusMeters": max(20, min(500, radius))})
+            updates["localPlaceLabels"] = clean_labels
+        merges = location.get("placeMerges")
+        if isinstance(merges, list):
+            updates["placeMerges"] = strip_profile_secrets(merges[:500])
+        if "osmPlacesEnabled" in location:
+            updates["osmPlacesEnabled"] = bool(location.get("osmPlacesEnabled"))
+    if not updates:
+        raise ValueError("No importable Lifey settings were found.")
+    return updates
 
 
 def has_archive_markers(text: str) -> bool:
@@ -139,6 +293,190 @@ def activity_log() -> dict:
 
 def save_activity(values: dict) -> None:
     ACTIVITY.write_text(json.dumps(values, indent=2))
+
+
+def quote_path(value: str) -> str:
+    return urlencode({"": value})[1:]
+
+
+def base64url_bytes(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def google_oauth_status(settings: dict | None = None) -> dict:
+    settings = settings or config()
+    return {
+        "configured": bool(google_client_id(settings)),
+        "hasClientSecret": bool(google_client_secret(settings)),
+        "connected": bool(settings.get("googleRefreshToken")),
+        "email": settings.get("googleAccountEmail", ""),
+        "calendar": google_calendar_id(settings),
+        "gmailQuery": google_gmail_query(settings),
+        "clientId": google_client_id(settings),
+    }
+
+
+def google_client_id(settings: dict | None = None) -> str:
+    settings = settings or config()
+    return str(settings.get("googleClientId") or settings.get("profilePreferences", {}).get("integrations", {}).get("google", {}).get("clientId") or "").strip()
+
+
+def google_client_secret(settings: dict | None = None) -> str:
+    settings = settings or config()
+    return str(settings.get("googleClientSecret", "")).strip()
+
+
+def google_calendar_id(settings: dict | None = None) -> str:
+    settings = settings or config()
+    return str(settings.get("googleCalendarId") or settings.get("profilePreferences", {}).get("integrations", {}).get("google", {}).get("calendar") or "primary").strip() or "primary"
+
+
+def google_gmail_query(settings: dict | None = None) -> str:
+    settings = settings or config()
+    return str(settings.get("gmailQuery") or settings.get("profilePreferences", {}).get("integrations", {}).get("gmail", {}).get("query") or "newer_than:14d (medium OR newsletter)").strip()
+
+
+def google_oauth_request(payload: dict) -> dict:
+    body = urlencode(payload).encode()
+    req = urlrequest.Request("https://oauth2.googleapis.com/token", data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urlrequest.urlopen(req, context=SSL_CONTEXT, timeout=12) as response:
+            return json.loads(response.read())
+    except urlerror.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        raise ValueError(f"Google OAuth failed ({error.code}): {detail}")
+
+
+def google_api_request(method: str, url: str, token: str, payload: dict | None = None) -> dict:
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    req = urlrequest.Request(url, data=data, method=method, headers=headers)
+    try:
+        with urlrequest.urlopen(req, context=SSL_CONTEXT, timeout=15) as response:
+            raw = response.read()
+            return json.loads(raw) if raw else {}
+    except urlerror.HTTPError as error:
+        detail = error.read().decode("utf-8", errors="replace")
+        if error.code == 401:
+            raise ValueError("Google authorization expired. Reconnect Google on this Mac.")
+        raise ValueError(f"Google API failed ({error.code}): {detail}")
+
+
+def google_access_token() -> str:
+    settings = config()
+    client_id = google_client_id(settings)
+    refresh_token = str(settings.get("googleRefreshToken", "")).strip()
+    if not client_id:
+        raise ValueError("Add a Google Desktop OAuth Client ID first.")
+    if not refresh_token:
+        raise ValueError("Connect Google on this Mac first.")
+    payload = {"client_id": client_id, "refresh_token": refresh_token, "grant_type": "refresh_token"}
+    if google_client_secret(settings):
+        payload["client_secret"] = google_client_secret(settings)
+    token = google_oauth_request(payload)
+    access_token = token.get("access_token")
+    if not access_token:
+        raise ValueError("Google did not return an access token. Reconnect Google on this Mac.")
+    return access_token
+
+
+def google_auth_url() -> str:
+    settings = config()
+    client_id = google_client_id(settings)
+    if not client_id:
+        raise ValueError("Add a Google Desktop OAuth Client ID first.")
+    if not google_client_secret(settings):
+        raise ValueError("Add and save the Google Desktop OAuth Client Secret first.")
+    verifier = base64url_bytes(secrets.token_bytes(64))
+    challenge = base64url_bytes(hashlib.sha256(verifier.encode()).digest())
+    state = secrets.token_urlsafe(24)
+    save_config({"googleOAuthState": state, "googleCodeVerifier": verifier, "googleRedirectUri": GOOGLE_REDIRECT_URI})
+    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+        "client_id": client_id,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "response_type": "code",
+        "scope": GOOGLE_SCOPES,
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    })
+
+
+def google_finish_auth(query: dict[str, list[str]]) -> str:
+    settings = config()
+    if query.get("error"):
+        raise ValueError(f"Google authorization failed: {query.get('error', ['unknown'])[0]}")
+    state = query.get("state", [""])[0]
+    code = query.get("code", [""])[0]
+    if not state or not secrets.compare_digest(state, str(settings.get("googleOAuthState", ""))):
+        save_config({"googleOAuthState": "", "googleCodeVerifier": ""})
+        raise ValueError("Google authorization state did not match. That usually means this was an old Google tab or Lifey was restarted mid-login. Start the connection again from Lifey.")
+    if not code:
+        raise ValueError("Google did not return an authorization code.")
+    payload = {
+        "client_id": google_client_id(settings),
+        "code": code,
+        "code_verifier": str(settings.get("googleCodeVerifier", "")),
+        "redirect_uri": str(settings.get("googleRedirectUri") or GOOGLE_REDIRECT_URI),
+        "grant_type": "authorization_code",
+    }
+    if google_client_secret(settings):
+        payload["client_secret"] = google_client_secret(settings)
+    token = google_oauth_request(payload)
+    refresh_token = token.get("refresh_token") or settings.get("googleRefreshToken")
+    if not refresh_token:
+        raise ValueError("Google did not return a refresh token. Reconnect and approve offline access.")
+    access_token = token.get("access_token")
+    email = ""
+    if access_token:
+        try:
+            email = google_api_request("GET", "https://openidconnect.googleapis.com/v1/userinfo", access_token).get("email", "")
+        except ValueError:
+            email = ""
+    save_config({"googleRefreshToken": refresh_token, "googleAccountEmail": email, "googleOAuthState": "", "googleCodeVerifier": "", "googleRedirectUri": GOOGLE_REDIRECT_URI})
+    return email
+
+
+def google_calendar_today() -> dict:
+    settings = config()
+    token = google_access_token()
+    start = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
+    end = start + dt.timedelta(days=1)
+    query = urlencode({"singleEvents": "true", "orderBy": "startTime", "timeMin": start.isoformat(), "timeMax": end.isoformat()})
+    return google_api_request("GET", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id(settings))}/events?{query}", token)
+
+
+def google_calendar_create(body: dict) -> dict:
+    token = google_access_token()
+    return google_api_request("POST", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events", token, body)
+
+
+def google_calendar_update(event_id: str, body: dict) -> dict:
+    token = google_access_token()
+    return google_api_request("PATCH", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events/{quote_path(event_id)}", token, body)
+
+
+def google_calendar_delete(event_id: str) -> dict:
+    token = google_access_token()
+    return google_api_request("DELETE", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events/{quote_path(event_id)}", token)
+
+
+def google_gmail_suggestions() -> dict:
+    token = google_access_token()
+    result = google_api_request("GET", f"https://gmail.googleapis.com/gmail/v1/users/me/messages?{urlencode({'q': google_gmail_query(), 'maxResults': '6'})}", token)
+    messages = []
+    for item in result.get("messages", [])[:6]:
+        message_id = item.get("id", "")
+        if not message_id:
+            continue
+        detail = google_api_request("GET", f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{quote_path(message_id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From", token)
+        headers = {header.get("name"): header.get("value", "") for header in detail.get("payload", {}).get("headers", [])}
+        messages.append({"id": message_id, "subject": headers.get("Subject", "(No subject)"), "from": headers.get("From", "Gmail"), "snippet": detail.get("snippet", "")})
+    return {"messages": messages}
 
 
 def mobile_location_samples() -> list[dict]:
@@ -220,14 +558,93 @@ def add_mobile_location_samples(samples: list[dict]) -> tuple[int, int]:
     return added, len(existing)
 
 
+def youtube_video_identity(raw_url: str, raw_video_id: str = "") -> tuple[str, str, str] | None:
+    parsed = urlparse(raw_url)
+    if parsed.scheme != "https" or not parsed.netloc.endswith("youtube.com"):
+        return None
+    video_id = raw_video_id.strip()
+    kind = "watch"
+    if not video_id and parsed.path == "/watch":
+        video_id = parse_qs(parsed.query).get("v", [""])[0].strip()
+    if not video_id and parsed.path.startswith("/shorts/"):
+        parts = [part for part in parsed.path.split("/") if part]
+        video_id = parts[1].strip() if len(parts) > 1 else ""
+        kind = "shorts"
+    if not video_id:
+        return None
+    canonical = f"https://www.youtube.com/shorts/{video_id}" if kind == "shorts" else f"https://www.youtube.com/watch?v={video_id}"
+    return video_id, canonical, kind
+
+
+def youtube_normalized_videos(videos: list[dict]) -> list[dict]:
+    merged: dict[str, dict] = {}
+    for video in videos or []:
+        identity = youtube_video_identity(str(video.get("url", "")), str(video.get("videoId", "")))
+        if not identity:
+            continue
+        video_id, canonical_url, kind = identity
+        item = merged.setdefault(video_id, {
+            "title": video.get("title") or "YouTube video",
+            "url": canonical_url,
+            "videoId": video_id,
+            "kind": kind,
+            "firstSeen": video.get("firstSeen", ""),
+            "lastSeen": video.get("lastSeen", ""),
+            "activeSeconds": 0,
+        })
+        if video.get("title"):
+            item["title"] = video["title"]
+        item["activeSeconds"] += int(video.get("activeSeconds", 0) or 0)
+        if video.get("firstSeen") and (not item.get("firstSeen") or video["firstSeen"] < item["firstSeen"]):
+            item["firstSeen"] = video["firstSeen"]
+        if video.get("lastSeen") and video["lastSeen"] > item.get("lastSeen", ""):
+            item["lastSeen"] = video["lastSeen"]
+    return list(merged.values())
+
+
 def youtube_today() -> dict:
     log = activity_log()
     today = dt.date.today().isoformat()
-    data = log.get("youtube", {})
-    if data.get("date") != today:
-        return {"date": today, "videos": [], "totalActiveSeconds": 0, "extensionLastSeen": log.get("youtubeExtensionLastSeen")}
-    videos = sorted(data.get("videos", []), key=lambda video: video.get("lastSeen", ""), reverse=True)
+    data = youtube_day_data(log, today)
+    videos = sorted(youtube_normalized_videos(data.get("videos", [])), key=lambda video: (int(video.get("activeSeconds", 0)), video.get("lastSeen", "")), reverse=True)
     return {"date": today, "videos": videos, "totalActiveSeconds": sum(video.get("activeSeconds", 0) for video in videos), "extensionLastSeen": log.get("youtubeExtensionLastSeen")}
+
+
+def youtube_day_data(log: dict, date: str) -> dict:
+    days = log.get("youtubeDays", {})
+    if isinstance(days, dict) and isinstance(days.get(date), dict):
+        return days[date]
+    current = log.get("youtube", {})
+    if isinstance(current, dict) and current.get("date") == date:
+        return current
+    return {"date": date, "videos": []}
+
+
+def youtube_week() -> dict:
+    log = activity_log()
+    start, _ = period_bounds("week")
+    days = []
+    aggregate: dict[str, dict] = {}
+    for offset in range(7):
+        date = (start.date() + dt.timedelta(days=offset)).isoformat()
+        data = youtube_day_data(log, date)
+        videos = sorted(youtube_normalized_videos(data.get("videos", [])), key=lambda video: (int(video.get("activeSeconds", 0)), video.get("lastSeen", "")), reverse=True)
+        total = sum(video.get("activeSeconds", 0) for video in videos)
+        days.append({"date": date, "videos": videos, "totalActiveSeconds": total})
+        for video in videos:
+            key = video.get("videoId") or video.get("url") or video.get("title") or f"{date}:{len(aggregate)}"
+            item = aggregate.setdefault(key, {"title": video.get("title", "YouTube video"), "url": video.get("url", ""), "videoId": video.get("videoId", ""), "kind": video.get("kind", "watch"), "activeSeconds": 0, "firstSeen": video.get("firstSeen", ""), "lastSeen": video.get("lastSeen", "")})
+            item["title"] = video.get("title") or item["title"]
+            item["url"] = video.get("url") or item["url"]
+            item["videoId"] = video.get("videoId") or item.get("videoId", "")
+            item["kind"] = video.get("kind") or item.get("kind", "watch")
+            item["activeSeconds"] += int(video.get("activeSeconds", 0))
+            if video.get("firstSeen") and (not item.get("firstSeen") or video["firstSeen"] < item["firstSeen"]):
+                item["firstSeen"] = video["firstSeen"]
+            if video.get("lastSeen") and video["lastSeen"] > item.get("lastSeen", ""):
+                item["lastSeen"] = video["lastSeen"]
+    top_videos = sorted(aggregate.values(), key=lambda video: (video.get("activeSeconds", 0), video.get("lastSeen", "")), reverse=True)
+    return {"start": start.date().isoformat(), "days": days, "videos": top_videos, "totalActiveSeconds": sum(day["totalActiveSeconds"] for day in days), "extensionLastSeen": log.get("youtubeExtensionLastSeen")}
 
 
 def notion_request(method: str, path: str, token: str, payload: dict | None = None) -> dict:
@@ -564,31 +981,127 @@ def notion_title(item: dict) -> str:
     return "".join(part.get("plain_text") or part.get("text", {}).get("content", "") for part in title) or "Untitled"
 
 
-def daily_names() -> list[str]:
-    today = dt.date.today()
+def daily_names_for(day: dt.date) -> list[str]:
     return [
-        f"{today.strftime('%B')} {today.day:02d}, {today.year}.md",
-        f"{today.strftime('%B')} {today.day}, {today.year}.md",
-        f"{today.isoformat()}.md",
+        f"{day.strftime('%B')} {day.day:02d}, {day.year}.md",
+        f"{day.strftime('%B')} {day.day}, {day.year}.md",
+        f"{day.isoformat()}.md",
     ]
 
 
-def daily_file() -> Path:
+def daily_names() -> list[str]:
+    return daily_names_for(dt.date.today())
+
+
+def daily_candidate_folders() -> list[Path]:
     raw = config().get("dailyNotesPath", "")
     folder = Path(raw).expanduser()
     if not folder.is_dir():
         raise FileNotFoundError("Configure an existing Journals or Daily notes folder first.")
     folders = [folder]
-    if folder.name.lower() == "daily":
-        folders.append(folder.parent)
-    else:
-        folders.append(folder / "Daily")
-    for candidate_folder in folders:
-        for name in daily_names():
+    folders.append(folder.parent if folder.name.lower() == "daily" else folder / "Daily")
+    unique: list[Path] = []
+    for item in folders:
+        if item not in unique:
+            unique.append(item)
+    return unique
+
+
+def daily_file() -> Path:
+    today = dt.date.today()
+    for candidate_folder in daily_candidate_folders():
+        for name in daily_names_for(today):
             candidate = candidate_folder / name
             if candidate.is_file():
                 return candidate
     raise FileNotFoundError(f"No note found for today ({daily_names()[0]}).")
+
+
+def daily_file_for_date(day: dt.date) -> Path | None:
+    for candidate_folder in daily_candidate_folders():
+        for name in daily_names_for(day):
+            candidate = candidate_folder / name
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def task_due_date(text: str) -> dt.date | None:
+    match = re.search(r"📅\s*(\d{4}-\d{2}-\d{2})", text)
+    if not match:
+        return None
+    try:
+        return dt.date.fromisoformat(match.group(1))
+    except ValueError:
+        return None
+
+
+def task_section_bounds(lines: list[str]) -> tuple[int | None, int | None]:
+    start = next((index for index, line in enumerate(lines) if re.match(r"^#{1,6}\s*Tasks::\s*$", line.strip(), re.IGNORECASE)), None)
+    if start is None:
+        return None, None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^#{1,6}\s+", lines[index]):
+            end = index
+            break
+    return start, end
+
+
+def archive_start_line(lines: list[str]) -> int | None:
+    for index in range(len(lines) - 1):
+        if lines[index].strip() == START and re.match(r"^##\s+Lifey\b", lines[index + 1].strip()):
+            return index
+    return None
+
+
+def insert_task_under_tasks(note: Path, text: str) -> dict:
+    previous = note.read_text()
+    lines = previous.splitlines()
+    task_line = f"- [ ] {text}"
+    start, end = task_section_bounds(lines)
+    if start is not None and end is not None:
+        prefix = lines[:end]
+        suffix = lines[end:]
+        while len(prefix) > start + 1 and not prefix[-1].strip():
+            prefix.pop()
+        insert = []
+        if len(prefix) == start + 1:
+            insert.append("")
+        insert.append(task_line)
+        if suffix and suffix[0].strip():
+            insert.append("")
+        line_number = len(prefix) + insert.index(task_line) + 1
+        updated_lines = prefix + insert + suffix
+    else:
+        habit_start, _ = habit_section_bounds(lines)
+        archive_start = archive_start_line(lines)
+        candidates = [index for index in (archive_start, habit_start) if index is not None]
+        insert_at = min(candidates) if candidates else len(lines)
+        prefix = lines[:insert_at]
+        suffix = lines[insert_at:]
+        while prefix and not prefix[-1].strip():
+            prefix.pop()
+        insert = []
+        if prefix:
+            insert.append("")
+        insert.extend(["## Tasks::", "", task_line])
+        if suffix and suffix[0].strip():
+            insert.append("")
+        line_number = len(prefix) + insert.index(task_line) + 1
+        updated_lines = prefix + insert + suffix
+    note.write_text("\n".join(updated_lines).rstrip() + "\n")
+    return {"line": line_number, "text": text, "path": str(note), "noteDate": (note_date_from_path(note) or dt.date.fromtimestamp(note.stat().st_mtime)).isoformat()}
+
+
+def target_note_for_new_task(text: str, prefer_due_date_note: bool = False) -> Path:
+    if prefer_due_date_note:
+        due = task_due_date(text)
+        if due:
+            due_note = daily_file_for_date(due)
+            if due_note:
+                return due_note
+    return daily_file()
 
 
 def journals_folder() -> Path:
@@ -598,6 +1111,11 @@ def journals_folder() -> Path:
     return folder.parent if folder.name.lower() == "daily" else folder
 
 
+def vault_folder() -> Path:
+    journals = journals_folder()
+    return journals.parent if journals.name.lower() in {"journals", "journal"} else journals.parent
+
+
 def note_safe_name(name: str) -> str:
     return re.sub(r"[/:\\]", "-", name).strip()[:160]
 
@@ -605,6 +1123,493 @@ def note_safe_name(name: str) -> str:
 def wiki_place(name: str) -> str:
     clean = str(name).replace('"', "'").replace("]]", "").strip() or "Unknown place"
     return f'[[Place - "{clean}"]]'
+
+
+def project_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def project_title_from_slug(slug: str) -> str:
+    return " ".join(part.capitalize() for part in slug.split("-") if part) or slug
+
+
+def decimal_field(body: str, field: str) -> float:
+    match = re.search(rf"\[{re.escape(field)}::\s*([0-9]+(?:\.[0-9]+)?)\]", body, re.IGNORECASE)
+    return float(match.group(1)) if match else 0.0
+
+
+def strip_project_task_text(body: str) -> str:
+    clean = re.sub(r"#project/[A-Za-z0-9/_-]+", "", body)
+    clean = re.sub(r"#milestone\b", "", clean)
+    clean = re.sub(r"\[(?:estimate|time)::\s*[0-9]+(?:\.[0-9]+)?\]", "", clean, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def project_notes() -> dict[str, dict]:
+    projects_dir = vault_folder() / "Projects"
+    notes: dict[str, dict] = {}
+    if not projects_dir.is_dir():
+        return notes
+    for note in sorted(projects_dir.glob("*.md")):
+        slug = project_slug(note.stem)
+        notes[slug] = {"slug": slug, "title": note.stem, "path": str(note)}
+    return notes
+
+
+def project_task_notes() -> list[Path]:
+    folders: list[Path] = []
+    for folder in daily_candidate_folders():
+        if folder.is_dir() and folder not in folders:
+            folders.append(folder)
+    notes: list[Path] = []
+    for folder in folders:
+        notes.extend(sorted(folder.glob("*.md")))
+    return sorted(set(notes))
+
+
+def parse_project_tasks_from_note(note: Path) -> list[dict]:
+    try:
+        markdown = note.read_text()
+    except OSError:
+        return []
+    lines = markdown.splitlines()
+    start, end = habit_section_bounds(lines)
+    tasks = []
+    for index, line in enumerate(lines):
+        if start is not None and end is not None and start < index < end:
+            continue
+        match = re.match(r"^\s*-\s+\[([ xX])\]\s+(.+?)\s*$", line)
+        if not match:
+            continue
+        body = match.group(2).strip()
+        project_tags = re.findall(r"#project/([A-Za-z0-9/_-]+)", body)
+        if not project_tags:
+            continue
+        for raw_slug in project_tags:
+            slug = project_slug(raw_slug)
+            if not slug:
+                continue
+            tasks.append({
+                "projectSlug": slug,
+                "projectTag": f"#project/{raw_slug}",
+                "text": strip_project_task_text(body),
+                "raw": body,
+                "done": match.group(1).lower() == "x",
+                "milestone": bool(re.search(r"#milestone\b", body)),
+                "estimate": decimal_field(body, "estimate"),
+                "time": decimal_field(body, "time"),
+                "source": str(note),
+                "line": index + 1,
+                "date": (note_date_from_path(note) or dt.date.fromtimestamp(note.stat().st_mtime)).isoformat(),
+            })
+    return tasks
+
+
+def projects_summary() -> dict:
+    notes = project_notes()
+    tasks = [task for note in project_task_notes() for task in parse_project_tasks_from_note(note)]
+    grouped: dict[str, dict] = {}
+    for slug, note in notes.items():
+        grouped[slug] = {**note, "tasks": []}
+    for task in tasks:
+        slug = task["projectSlug"]
+        grouped.setdefault(slug, {"slug": slug, "title": project_title_from_slug(slug), "path": "", "tasks": []})
+        grouped[slug]["tasks"].append(task)
+    projects = []
+    for project in grouped.values():
+        project_tasks = sorted(project["tasks"], key=lambda item: (not item["milestone"], item["done"], item["date"], item["line"]))
+        completed = sum(1 for task in project_tasks if task["done"])
+        milestones = [task for task in project_tasks if task["milestone"]]
+        projects.append({
+            **{key: project.get(key, "") for key in ("slug", "title", "path")},
+            "taskCount": len(project_tasks),
+            "completedCount": completed,
+            "openCount": len(project_tasks) - completed,
+            "milestoneCount": len(milestones),
+            "milestoneCompleted": sum(1 for task in milestones if task["done"]),
+            "estimateTotal": round(sum(task["estimate"] for task in project_tasks), 2),
+            "timeTotal": round(sum(task["time"] for task in project_tasks), 2),
+            "tasks": project_tasks,
+        })
+    projects.sort(key=lambda item: (item["openCount"] == 0, -item["milestoneCount"], -item["openCount"], item["title"].lower()))
+    return {"projects": projects, "taskCount": len(tasks), "projectsPath": str(vault_folder() / "Projects"), "templatePath": str(vault_folder() / "Templates" / "Project.md")}
+
+
+def project_note_path(slug: str, title: str = "") -> Path:
+    notes = project_notes()
+    if slug in notes and notes[slug].get("path"):
+        return Path(notes[slug]["path"])
+    return vault_folder() / "Projects" / f"{note_safe_name(title or project_title_from_slug(slug))}.md"
+
+
+def create_project_note(slug: str, title: str = "") -> dict:
+    clean_slug = project_slug(slug or title)
+    if not clean_slug:
+        raise ValueError("Choose a project name first.")
+    project_title = title.strip() or project_title_from_slug(clean_slug)
+    destination = project_note_path(clean_slug, project_title)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists():
+        templates_dir = vault_folder() / "Templates"
+        template = templates_dir / "Project.md"
+        if not template.is_file():
+            template = templates_dir / "Project"
+        content = template.read_text() if template.is_file() else "# {{title}}\n\n## Tasks\n\n```tasks\nnot done\ntag includes #project/{{slug}}\n```\n"
+        content = content.replace("{{title}}", project_title).replace("{{project}}", project_title).replace("{{slug}}", clean_slug)
+        destination.write_text(content.rstrip() + "\n")
+    return {"slug": clean_slug, "title": project_title, "path": str(destination)}
+
+
+def open_project_note(slug: str) -> dict:
+    note = project_note_path(project_slug(slug))
+    if not note.is_file():
+        raise FileNotFoundError("Create the project note first.")
+    subprocess.run(["open", str(note)], check=False)
+    return {"opened": True, "path": str(note)}
+
+
+def safe_project_task_source(source: str) -> Path:
+    source_path = Path(source).expanduser().resolve()
+    allowed = [folder.resolve() for folder in daily_candidate_folders()]
+    if not any(source_path.is_relative_to(folder) for folder in allowed):
+        raise ValueError("Project task source must be inside your Daily Notes folders.")
+    if not source_path.is_file():
+        raise FileNotFoundError("Project task source note no longer exists.")
+    return source_path
+
+
+def update_project_task(body: dict) -> dict:
+    note = safe_project_task_source(str(body.get("source", "")))
+    line_number = int(body.get("line", 0))
+    expected_text = str(body.get("previousText", "")).strip()
+    lines = note.read_text().splitlines(keepends=True)
+    if not 1 <= line_number <= len(lines):
+        raise ValueError("Project task line no longer exists.")
+    if line_in_habit_section(lines, line_number):
+        raise ValueError("That line is inside Habits::. Use the Habits card instead.")
+    match = re.match(r"^(\s*-\s+\[)[ xX](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
+    if not match or match.group(3).strip() != expected_text:
+        raise ValueError("Project task changed in Obsidian. Refresh projects first.")
+    if "completed" in body:
+        marker = "x" if body.get("completed") else " "
+        replacement_text = match.group(3)
+    else:
+        marker = "x" if match.group(0).lower().find("[x]") >= 0 else " "
+        replacement_text = " ".join(str(body.get("text", "")).splitlines()).strip()
+        if not replacement_text:
+            raise ValueError("Write a task first.")
+        if "#project/" not in replacement_text:
+            raise ValueError("Project tasks must keep a #project/... tag.")
+    lines[line_number - 1] = match.group(1) + marker + match.group(2) + replacement_text + match.group(4)
+    note.write_text("".join(lines))
+    return {"line": line_number, "path": str(note), "text": replacement_text, "completed": marker == "x"}
+
+
+WEEKDAY_CODES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def habits_config_path() -> Path:
+    root = journals_folder()
+    preferred = root / "Habits" / "Active Habits.md"
+    fallback = root / "Active Habits.md"
+    return preferred if preferred.exists() or not fallback.exists() else fallback
+
+
+def split_markdown_table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def normalise_habit_time(value: str) -> tuple[str, int | None]:
+    raw = (value or "").strip()
+    if not raw:
+        return "", None
+    cleaned = raw.lower().replace(".", "")
+    match = re.match(r"^(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?$", cleaned)
+    if not match:
+        return raw, None
+    hour = int(match.group(1))
+    minute = int(match.group(2) or 0)
+    period = match.group(3)
+    if period:
+        if hour == 12:
+            hour = 0
+        if period == "pm":
+            hour += 12
+    if hour > 23:
+        return raw, None
+    return f"{hour:02d}:{minute:02d}", hour * 60 + minute
+
+
+def habit_note_schedule(body: str) -> dict:
+    time_label = ""
+    time_minutes = None
+    time_match = re.search(r"⏰\s*(\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)?)", body, re.IGNORECASE)
+    if not time_match:
+        time_match = re.search(r"\b(?:at\s+)?(\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?))\b", body, re.IGNORECASE)
+    if not time_match:
+        time_match = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", body)
+    if time_match:
+        time_value = f"{time_match.group(1)}:{time_match.group(2)}" if len(time_match.groups()) > 1 and time_match.group(2) else time_match.group(1)
+        time_label, time_minutes = normalise_habit_time(time_value)
+    date_match = re.search(r"📅\s*(\d{4}-\d{2}-\d{2})", body)
+    return {
+        "dueDate": date_match.group(1) if date_match else "",
+        "time": time_label,
+        "timeMinutes": time_minutes,
+    }
+
+
+def habit_body_without_schedule(body: str) -> str:
+    cleaned = re.sub(r"\s*📅\s*\d{4}-\d{2}-\d{2}", "", body)
+    cleaned = re.sub(r"\s*⏰\s*\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)?", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\b(?:at\s+)?\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*\b(?:at\s+)?(?:[01]?\d|2[0-3]):[0-5]\d\b", "", cleaned)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def read_habit_config() -> list[dict]:
+    path = habits_config_path()
+    if not path.is_file():
+        return []
+    rows: list[str] = []
+    for line in path.read_text().splitlines():
+        if line.strip().startswith("|"):
+            rows.append(line)
+        elif rows:
+            break
+    if len(rows) < 2:
+        return []
+    headers = [header.strip().lower() for header in split_markdown_table_row(rows[0])]
+    habits = []
+    for order, line in enumerate(rows[2:]):
+        if re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line):
+            continue
+        cells = split_markdown_table_row(line)
+        if not cells or not any(cells):
+            continue
+        item = {headers[index]: cells[index] if index < len(cells) else "" for index in range(len(headers))}
+        name = item.get("habit", "").strip()
+        if not name:
+            continue
+        days_raw = item.get("days", "Daily").strip() or "Daily"
+        days = ["Daily"] if days_raw.lower() == "daily" else [day.strip() for day in days_raw.split(",") if day.strip()]
+        try:
+            start = dt.date.fromisoformat(item.get("start", "").strip())
+        except ValueError:
+            start = None
+        try:
+            duration = int(item.get("duration", "").strip()) if item.get("duration", "").strip() else None
+        except ValueError:
+            duration = None
+        time_label, time_minutes = normalise_habit_time(item.get("time", ""))
+        habits.append({
+            "habit": name,
+            "start": start.isoformat() if start else "",
+            "duration": duration,
+            "days": days,
+            "daysText": days_raw,
+            "time": time_label,
+            "timeMinutes": time_minutes,
+            "order": order,
+            "label": item.get("label", "Day").strip() or "Day",
+            "status": item.get("status", "").strip().lower() or "active",
+        })
+    return habits
+
+
+def note_date_from_path(path: Path) -> dt.date | None:
+    stem = path.stem
+    for pattern in ("%B %d, %Y", "%B %e, %Y", "%Y-%m-%d"):
+        try:
+            return dt.datetime.strptime(stem, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def habit_scheduled_for(habit: dict, day: dt.date) -> bool:
+    if habit.get("status") != "active":
+        return False
+    try:
+        start = dt.date.fromisoformat(habit.get("start", ""))
+        if day < start:
+            return False
+    except ValueError:
+        pass
+    days = habit.get("days") or ["Daily"]
+    return "Daily" in days or WEEKDAY_CODES[day.weekday()] in days
+
+
+def habit_progress_label(habit: dict, day: dt.date) -> str:
+    label = habit.get("label") or "Day"
+    try:
+        start = dt.date.fromisoformat(habit.get("start", ""))
+        number = (day - start).days + 1
+    except ValueError:
+        number = 1
+    suffix = f"/{habit['duration']}" if habit.get("duration") else ""
+    return f"{label} {max(1, number)}{suffix}"
+
+
+def expected_habits_for(day: dt.date) -> list[dict]:
+    expected = []
+    for habit in read_habit_config():
+        if not habit_scheduled_for(habit, day):
+            continue
+        label = habit_progress_label(habit, day)
+        metadata = f" ⏰ {habit['time']}" if habit.get("time") else ""
+        expected.append({**habit, "date": day.isoformat(), "progress": label, "text": f"{habit['habit']} — {label}{metadata}"})
+    return sorted(expected, key=habit_sort_key)
+
+
+def habit_sort_key(habit: dict) -> tuple[str, int, int, int, str]:
+    due_date = habit.get("dueDate") or habit.get("date") or ""
+    minutes = habit.get("timeMinutes")
+    return (due_date, 0 if isinstance(minutes, int) else 1, minutes if isinstance(minutes, int) else 24 * 60, int(habit.get("order", 9999)), habit.get("habit", "").lower())
+
+
+def attach_habit_config(habits: list[dict], config_habits: list[dict]) -> list[dict]:
+    by_name = {habit.get("habit", "").strip().lower(): habit for habit in config_habits}
+    enriched = []
+    for habit in habits:
+        config_habit = by_name.get(habit.get("habit", "").strip().lower(), {})
+        enriched.append({
+            **habit,
+            "dueDate": habit.get("dueDate") or config_habit.get("date", ""),
+            "time": habit.get("time") or config_habit.get("time", ""),
+            "timeMinutes": habit.get("timeMinutes") if isinstance(habit.get("timeMinutes"), int) else config_habit.get("timeMinutes"),
+            "order": config_habit.get("order", 9999),
+        })
+    return sorted(enriched, key=habit_sort_key)
+
+
+def habit_section_bounds(lines: list[str]) -> tuple[int | None, int | None]:
+    start = next((index for index, line in enumerate(lines) if re.match(r"^(?:#{1,6}\s*)?Habits::\s*$", line.strip(), re.IGNORECASE)), None)
+    if start is None:
+        return None, None
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        if re.match(r"^#{1,6}\s+", lines[index]):
+            end = index
+            break
+    return start, end
+
+
+def line_in_habit_section(lines: list[str], line_number: int) -> bool:
+    start, end = habit_section_bounds([line.rstrip("\r\n") for line in lines])
+    return start is not None and end is not None and start < line_number - 1 < end
+
+
+def parse_habit_lines(markdown: str, source: str = "") -> list[dict]:
+    lines = markdown.splitlines()
+    start, end = habit_section_bounds(lines)
+    if start is None or end is None:
+        return []
+    habits = []
+    for index in range(start + 1, end):
+        match = re.match(r"^(\s*)-\s+\[([ xX-])\]\s+(.+?)\s*$", lines[index])
+        if not match:
+            continue
+        body = match.group(3).strip()
+        schedule = habit_note_schedule(body)
+        clean_body = habit_body_without_schedule(body)
+        name, progress = (clean_body.split(" — ", 1) + [""])[:2] if " — " in clean_body else (clean_body, "")
+        marker = match.group(2).lower()
+        state = "completed" if marker == "x" else "skipped" if marker == "-" else "pending"
+        habits.append({"habit": name.strip(), "progress": progress.strip(), "text": body, **schedule, "state": state, "line": index + 1, "source": source})
+    return habits
+
+
+def sync_today_habits() -> dict:
+    note = daily_file()
+    day = note_date_from_path(note) or dt.date.today()
+    previous = note.read_text()
+    lines = previous.splitlines()
+    start, end = habit_section_bounds(lines)
+    if start is None:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.extend(["## Habits::"])
+        start, end = len(lines) - 1, len(lines)
+    existing = parse_habit_lines("\n".join(lines), str(note))
+    existing_names = {item["habit"].strip().lower() for item in existing}
+    additions = [habit for habit in expected_habits_for(day) if habit["habit"].strip().lower() not in existing_names]
+    if additions:
+        insert_at = end if end is not None else len(lines)
+        new_lines = [f"- [ ] {habit['text']}" for habit in additions]
+        lines[insert_at:insert_at] = new_lines
+        note.write_text("\n".join(lines).rstrip() + "\n")
+    return habits_today()
+
+
+def habits_today() -> dict:
+    note = daily_file()
+    day = note_date_from_path(note) or dt.date.today()
+    markdown = note.read_text()
+    config_habits = read_habit_config()
+    parsed = attach_habit_config([{**habit, "date": day.isoformat()} for habit in parse_habit_lines(markdown, str(note))], config_habits)
+    expected = expected_habits_for(day)
+    archived = [habit for habit in config_habits if habit.get("status") != "active"]
+    return {"date": day.isoformat(), "path": str(note), "habits": parsed, "expected": expected, "archived": archived, "configPath": str(habits_config_path())}
+
+
+def update_today_habit(line_number: int, habit: str, state: str) -> dict:
+    note = daily_file()
+    lines = note.read_text().splitlines(keepends=True)
+    if not 1 <= line_number <= len(lines):
+        raise ValueError("Habit line no longer exists in today's note.")
+    if not line_in_habit_section(lines, line_number):
+        raise ValueError("That line is not inside the Habits:: section. Refresh habits first.")
+    match = re.match(r"^(\s*-\s+\[)[ xX-](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
+    if not match:
+        raise ValueError("Habit line changed in Obsidian. Refresh habits first.")
+    body = match.group(3).strip()
+    current_name = body.split(" — ", 1)[0].strip()
+    if current_name != habit:
+        raise ValueError("Habit changed in Obsidian. Refresh habits first.")
+    marker = {"completed": "x", "pending": " ", "skipped": "-"}.get(state)
+    if marker is None:
+        raise ValueError("Choose completed, pending, or skipped.")
+    lines[line_number - 1] = match.group(1) + marker + match.group(2) + match.group(3) + match.group(4)
+    note.write_text("".join(lines))
+    return habits_today()
+
+
+def habit_history(range_name: str = "month") -> dict:
+    today = dt.date.today()
+    month_start = today.replace(day=1)
+    entries = []
+    daily_totals: dict[str, dict] = {}
+    habit_names: set[str] = set()
+    for folder in daily_candidate_folders():
+        if not folder.is_dir():
+            continue
+        for note in sorted(folder.glob("*.md")):
+            day = note_date_from_path(note)
+            if not day or (range_name != "all" and day < month_start):
+                continue
+            try:
+                habits = parse_habit_lines(note.read_text(), str(note))
+            except OSError:
+                continue
+            if not habits:
+                continue
+            total = daily_totals.setdefault(day.isoformat(), {"date": day.isoformat(), "completed": 0, "scheduled": 0, "skipped": 0})
+            for habit in habits:
+                habit_names.add(habit["habit"])
+                entries.append({**habit, "date": day.isoformat()})
+                total["scheduled"] += 1
+                if habit["state"] == "completed":
+                    total["completed"] += 1
+                if habit["state"] == "skipped":
+                    total["skipped"] += 1
+    config_habits = read_habit_config()
+    config_by_name = {habit.get("habit", "").strip().lower(): habit for habit in config_habits}
+    entries = [{**entry, "time": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("time", ""), "timeMinutes": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("timeMinutes"), "order": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("order", 9999)} for entry in entries]
+    archived = [habit for habit in config_habits if habit.get("status") != "active"]
+    for habit in config_habits:
+        habit_names.add(habit["habit"])
+    return {"range": range_name, "entries": sorted(entries, key=lambda item: (item.get("date", ""), *habit_sort_key(item))), "dailyTotals": sorted(daily_totals.values(), key=lambda item: item["date"]), "habits": sorted(habit_names), "active": sorted([h for h in config_habits if h.get("status") == "active"], key=habit_sort_key), "archived": sorted(archived, key=habit_sort_key)}
 
 
 def archive_period_title(period: str) -> str:
@@ -845,17 +1850,58 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def html(self, value: str, status=HTTPStatus.OK):
+        payload = value.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
     def read_json(self) -> dict:
         length = int(self.headers.get("Content-Length", 0))
         return json.loads(self.rfile.read(length) or b"{}")
 
     def do_GET(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
         if path == "/api/obsidian/status":
             settings = config()
             return self.json({"configured": bool(settings.get("dailyNotesPath")), "dailyNotesPath": settings.get("dailyNotesPath", ""), "notionConfigured": bool(settings.get("notionToken") and settings.get("notionParentId")), "archiveTemplate": settings.get("archiveTemplate", "")})
         if path == "/api/profile/preferences":
             return self.json({"preferences": config().get("profilePreferences", {})})
+        if path == "/api/profile/export":
+            return self.json(profile_export_bundle())
+        if path == "/api/google/status":
+            return self.json(google_oauth_status())
+        if path == "/api/google/auth/start":
+            try:
+                if self.client_address[0] not in {"127.0.0.1", "::1"}:
+                    return self.json({"error": "Google must be connected from the Mac at http://127.0.0.1:4173."}, HTTPStatus.FORBIDDEN)
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", google_auth_url())
+                self.end_headers()
+                return
+            except ValueError as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/google/auth/callback":
+            try:
+                email = google_finish_auth(parse_qs(parsed.query))
+                escaped_email = email.replace("<", "&lt;").replace(">", "&gt;") or "your Google account"
+                return self.html(f"<!doctype html><title>Lifey Google connected</title><meta http-equiv='refresh' content='1;url=/'><body style='font-family:system-ui;background:#2F383E;color:white;padding:32px'><h1>Google connected</h1><p>Lifey is connected to {escaped_email}. Returning to Lifey…</p><p><a style='color:#ff907d' href='/'>Open Lifey</a></p></body>")
+            except ValueError as error:
+                message = str(error).replace("<", "&lt;").replace(">", "&gt;")
+                return self.html(f"<!doctype html><title>Lifey Google error</title><body style='font-family:system-ui;background:#2F383E;color:white;padding:32px'><h1>Google connection failed</h1><p>{message}</p><p><a style='color:#ff907d' href='/'>Back to Lifey</a></p></body>", HTTPStatus.BAD_REQUEST)
+        if path == "/api/google/calendar/today":
+            try:
+                return self.json(google_calendar_today())
+            except ValueError as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/google/gmail/suggestions":
+            try:
+                return self.json(google_gmail_suggestions())
+            except ValueError as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/notion/status":
             settings = config()
             return self.json({"configured": bool(settings.get("notionToken") and settings.get("notionParentId"))})
@@ -892,8 +1938,26 @@ class Handler(SimpleHTTPRequestHandler):
                 data = week_location_data(); data["osmError"] = config().get("osmLastError", "")
                 return self.json(data)
             except ValueError as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/habits/today":
+            try:
+                return self.json(habits_today())
+            except (OSError, FileNotFoundError, ValueError) as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/habits/history":
+            try:
+                range_name = parse_qs(parsed.query).get("range", ["month"])[0]
+                return self.json(habit_history("all" if range_name == "all" else "month"))
+            except (OSError, FileNotFoundError, ValueError) as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+        if path == "/api/projects":
+            try:
+                return self.json(projects_summary())
+            except (OSError, FileNotFoundError, ValueError) as error:
+                return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/activity/youtube/today":
             return self.json(youtube_today())
+        if path == "/api/activity/youtube/week":
+            return self.json(youtube_week())
         if path == "/api/obsidian/daily":
             try:
                 note = daily_file()
@@ -930,10 +1994,50 @@ class Handler(SimpleHTTPRequestHandler):
                 preferences = body.get("preferences", {})
                 if not isinstance(preferences, dict):
                     return self.json({"error": "Invalid Lifey profile preferences."}, HTTPStatus.BAD_REQUEST)
-                allowed = {"appearance", "visibility", "taskDisplay", "contentDisplay", "heroMetricOrder", "integrations"}
-                clean = {key: preferences[key] for key in allowed if key in preferences}
+                clean = {key: strip_profile_secrets(preferences[key]) for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
                 save_config({"profilePreferences": clean})
                 return self.json({"saved": True, "preferences": clean})
+            if path == "/api/profile/import":
+                updates = clean_profile_import(body)
+                save_config(updates)
+                return self.json({"imported": True, "profile": profile_export_bundle()["profile"], "excludedSecrets": PROFILE_EXCLUDED_SECRETS})
+            if path == "/api/projects/create":
+                return self.json(create_project_note(str(body.get("slug", "")), str(body.get("title", ""))))
+            if path == "/api/projects/open":
+                return self.json(open_project_note(str(body.get("slug", ""))))
+            if path == "/api/projects/task":
+                return self.json(update_project_task(body))
+            if path == "/api/google/config":
+                client_id = str(body.get("clientId", "")).strip()
+                client_secret = str(body.get("clientSecret", "")).strip()
+                calendar = str(body.get("calendar", "primary")).strip() or "primary"
+                gmail_query = str(body.get("gmailQuery", "")).strip()
+                if not client_id:
+                    return self.json({"error": "Google Desktop OAuth Client ID is required."}, HTTPStatus.BAD_REQUEST)
+                updates = {"googleClientId": client_id, "googleCalendarId": calendar, "googleOAuthState": "", "googleCodeVerifier": ""}
+                if client_secret:
+                    updates["googleClientSecret"] = client_secret
+                if gmail_query:
+                    updates["gmailQuery"] = gmail_query
+                save_config(updates)
+                return self.json({"saved": True, "status": google_oauth_status()})
+            if path == "/api/google/disconnect":
+                save_config({"googleRefreshToken": "", "googleAccountEmail": "", "googleOAuthState": "", "googleCodeVerifier": ""})
+                return self.json({"disconnected": True, "status": google_oauth_status()})
+            if path == "/api/google/calendar/event":
+                return self.json(google_calendar_create(body))
+            if path == "/api/google/calendar/event/update":
+                event_id = str(body.get("eventId", "")).strip()
+                event = body.get("event", {})
+                if not event_id or not isinstance(event, dict):
+                    return self.json({"error": "Calendar event ID and update are required."}, HTTPStatus.BAD_REQUEST)
+                return self.json(google_calendar_update(event_id, event))
+            if path == "/api/google/calendar/event/delete":
+                event_id = str(body.get("eventId", "")).strip()
+                if not event_id:
+                    return self.json({"error": "Calendar event ID is required."}, HTTPStatus.BAD_REQUEST)
+                google_calendar_delete(event_id)
+                return self.json({"deleted": True})
             if path == "/api/obsidian/archive":
                 note = daily_file()
                 generated = body.get("archive", "")
@@ -995,6 +2099,13 @@ class Handler(SimpleHTTPRequestHandler):
                 if period not in {"weekly", "monthly", "yearly"}:
                     return self.json({"error": "Choose weekly, monthly, or yearly."}, HTTPStatus.BAD_REQUEST)
                 return self.json(write_location_archive(period))
+            if path == "/api/habits/sync":
+                return self.json(sync_today_habits())
+            if path == "/api/habits/state":
+                line_number = int(body.get("line", 0))
+                habit = str(body.get("habit", "")).strip()
+                state = str(body.get("state", "")).strip()
+                return self.json(update_today_habit(line_number, habit, state))
             if path == "/api/obsidian/task":
                 note = daily_file()
                 line_number = int(body.get("line", 0))
@@ -1002,6 +2113,8 @@ class Handler(SimpleHTTPRequestHandler):
                 lines = note.read_text().splitlines(keepends=True)
                 if not 1 <= line_number <= len(lines):
                     return self.json({"error": "Task line no longer exists in today's note."}, HTTPStatus.CONFLICT)
+                if line_in_habit_section(lines, line_number):
+                    return self.json({"error": "That checkbox is inside Habits::. Use the Habits card to edit it."}, HTTPStatus.CONFLICT)
                 match = re.match(r"^(\s*-\s+\[)[ xX](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
                 if not match or match.group(3).strip() != expected_text:
                     return self.json({"error": "Task changed in Obsidian. Refresh the daily note before completing it."}, HTTPStatus.CONFLICT)
@@ -1021,6 +2134,8 @@ class Handler(SimpleHTTPRequestHandler):
                 lines = note.read_text().splitlines(keepends=True)
                 if not 1 <= line_number <= len(lines):
                     return self.json({"error": "Task line no longer exists in today's note."}, HTTPStatus.CONFLICT)
+                if line_in_habit_section(lines, line_number):
+                    return self.json({"error": "That checkbox is inside Habits::. Use the Habits card to edit it."}, HTTPStatus.CONFLICT)
                 match = re.match(r"^(\s*-\s+\[)[ xX](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
                 if not match or match.group(3).strip() != expected_text:
                     return self.json({"error": "Task changed in Obsidian. Refresh the daily note before editing it."}, HTTPStatus.CONFLICT)
@@ -1034,6 +2149,8 @@ class Handler(SimpleHTTPRequestHandler):
                 lines = note.read_text().splitlines(keepends=True)
                 if not 1 <= line_number <= len(lines):
                     return self.json({"error": "Task line no longer exists in today's note."}, HTTPStatus.CONFLICT)
+                if line_in_habit_section(lines, line_number):
+                    return self.json({"error": "That checkbox is inside Habits::. Use the Habits card to edit it."}, HTTPStatus.CONFLICT)
                 match = re.match(r"^\s*-\s+\[[ xX]\]\s+(.*?)(?:\r?\n)?$", lines[line_number - 1])
                 if not match or match.group(1).strip() != expected_text:
                     return self.json({"error": "Task changed in Obsidian. Refresh the daily note before deleting it."}, HTTPStatus.CONFLICT)
@@ -1046,19 +2163,8 @@ class Handler(SimpleHTTPRequestHandler):
                     return self.json({"error": "Write a task first."}, HTTPStatus.BAD_REQUEST)
                 if len(text) > 2_000:
                     return self.json({"error": "Keep the task under 2,000 characters."}, HTTPStatus.BAD_REQUEST)
-                note = daily_file()
-                previous = note.read_text()
-                generated = archive_block(previous)
-                task_line = f"- [ ] {text}\n"
-                if generated:
-                    prefix, suffix = previous[:generated.search(previous).start()].rstrip(), previous[generated.search(previous).start():]
-                    line_number = prefix.count("\n") + (2 if prefix else 1)
-                    updated = f"{prefix}\n{task_line}\n{suffix.lstrip()}" if prefix else f"{task_line}\n{suffix.lstrip()}"
-                else:
-                    line_number = previous.rstrip().count("\n") + (2 if previous.rstrip() else 1)
-                    updated = f"{previous.rstrip()}\n{task_line}" if previous.rstrip() else task_line
-                note.write_text(updated)
-                return self.json({"line": line_number, "text": text, "path": str(note)})
+                note = target_note_for_new_task(text, bool(body.get("preferDueDateNote")))
+                return self.json(insert_task_under_tasks(note, text))
             if path == "/api/notion/config":
                 token = str(body.get("token", "")).strip()
                 parent = str(body.get("parentId", "")).strip()
@@ -1105,21 +2211,30 @@ class Handler(SimpleHTTPRequestHandler):
             if path == "/api/activity/youtube":
                 url = str(body.get("url", "")).strip()
                 title = str(body.get("title", "")).strip() or "YouTube video"
-                if not url.startswith("https://"):
-                    return self.json({"error": "A valid YouTube URL is required."}, HTTPStatus.BAD_REQUEST)
+                identity = youtube_video_identity(url, str(body.get("videoId", "")))
+                if not identity:
+                    return self.json(youtube_today())
+                video_id, canonical_url, kind = identity
                 now = dt.datetime.now().astimezone().isoformat()
-                log = activity_log(); today = dt.date.today().isoformat(); data = log.get("youtube", {})
-                if data.get("date") != today:
-                    data = {"date": today, "videos": []}
+                log = activity_log(); today = dt.date.today().isoformat(); days = log.setdefault("youtubeDays", {})
+                if not isinstance(days, dict):
+                    days = {}; log["youtubeDays"] = days
+                current = log.get("youtube", {})
+                if isinstance(current, dict) and current.get("date") and current.get("videos") and current.get("date") not in days:
+                    days[current["date"]] = current
+                data = days.setdefault(today, {"date": today, "videos": []})
                 videos = data.setdefault("videos", [])
-                video = next((item for item in videos if item.get("url") == url), None)
+                video = next((item for item in videos if item.get("videoId") == video_id or item.get("url") == canonical_url), None)
                 if not video:
-                    video = {"title": title, "url": url, "firstSeen": body.get("firstSeen") or now, "lastSeen": now, "activeSeconds": 0}
+                    video = {"title": title, "url": canonical_url, "videoId": video_id, "kind": kind, "firstSeen": body.get("firstSeen") or now, "lastSeen": now, "activeSeconds": 0}
                     videos.append(video)
                 video["title"] = title
+                video["url"] = canonical_url
+                video["videoId"] = video_id
+                video["kind"] = kind
                 video["lastSeen"] = body.get("lastSeen") or now
                 video["activeSeconds"] += min(max(int(body.get("activeSeconds", 0)), 0), 60)
-                log["youtube"] = data; save_activity(log)
+                days[today] = data; log["youtube"] = data; save_activity(log)
                 return self.json(youtube_today())
             if path == "/api/activity/youtube/ping":
                 log = activity_log(); log["youtubeExtensionLastSeen"] = dt.datetime.now().astimezone().isoformat(); save_activity(log)
@@ -1164,12 +2279,16 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    local_server = ThreadingHTTPServer(("127.0.0.1", 4173), Handler)
-    tailnet_address = tailscale_ipv4()
+    lan_enabled = os.environ.get("LIFEY_LAN", "").lower() in {"1", "true", "yes"}
+    local_host = "0.0.0.0" if lan_enabled else "127.0.0.1"
+    local_server = ThreadingHTTPServer((local_host, 4173), Handler)
+    tailnet_address = None if lan_enabled else tailscale_ipv4()
     if tailnet_address:
         tailnet_server = ThreadingHTTPServer((tailnet_address, 4173), Handler)
         threading.Thread(target=tailnet_server.serve_forever, daemon=True).start()
         print(f"Lifey → http://127.0.0.1:4173\nLifey on your private Tailscale network → http://{tailnet_address}:4173")
     else:
         print("Lifey → http://127.0.0.1:4173")
+    if lan_enabled:
+        print("Lifey on this Wi‑Fi/LAN → http://YOUR-MAC-WIFI-IP:4173")
     local_server.serve_forever()

@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUTPUT="$ROOT/outputs/lifey-youtube-tracker-0.1.3.xpi"
+OUTPUT="$ROOT/outputs/lifey-youtube-tracker-0.1.4.xpi"
 mkdir -p "$ROOT/outputs"
 rm -f "$OUTPUT"
 cd "$ROOT/browser-extension"
