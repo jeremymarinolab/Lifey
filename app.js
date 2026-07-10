@@ -60,6 +60,7 @@ const state = loadStoredState() || {
   question: '',
   integrations: { notion: {}, google: {}, spotify: {}, gmail: {} },
 };
+let profileSyncTimer;
 state.tasks ||= [];
 state.accounts ||= [];
 state.integrations ||= { notion: {}, google: {}, spotify: {}, gmail: {} };
@@ -168,7 +169,6 @@ const EMPTY_INSPIRATION_FIXTURES = [
   { source: 'Manual source · Readwise', time: '8 min', title: 'A small note worth revisiting', why: 'A saved highlight that fits today’s focus.' },
 ];
 
-let profileSyncTimer;
 function profilePreferences() { return { appearance: state.appearance, visibility: state.visibility, taskDisplay: state.taskDisplay, contentDisplay: state.contentDisplay, heroMetricOrder: state.heroMetricOrder, heroMetricVisibility: state.heroMetricVisibility, cardOrder: state.cardOrder, integrations: state.integrations, habitSettings: state.habitSettings }; }
 function persist() { saveStoredState(state); clearTimeout(profileSyncTimer); profileSyncTimer = setTimeout(() => localRequest('/api/profile/preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ preferences: profilePreferences() }) }).catch(() => {}), 350); }
 function saveDashboardBackgroundImage(file) {
