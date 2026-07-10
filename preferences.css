@@ -189,6 +189,14 @@ dialog:has(.preferences) {
   font-size:13px;
   cursor:pointer
 }
+button.preference-toggle {
+  width:100%;
+  padding:0;
+  border:0;
+  background:transparent;
+  font-family:inherit;
+  text-align:left
+}
 .preference-toggle input {
   position:absolute;
   opacity:0
@@ -215,7 +223,13 @@ dialog:has(.preferences) {
 .preference-toggle input:checked+i {
   background:var(--accent)
 }
+.preference-toggle[aria-checked=true] i {
+  background:var(--accent)
+}
 .preference-toggle input:checked+i:after {
+  transform:translateX(15px)
+}
+.preference-toggle[aria-checked=true] i:after {
   transform:translateX(15px)
 }
 .preference-sub {
@@ -234,6 +248,9 @@ dialog:has(.preferences) {
   height:15px
 }
 .preference-toggle.small input:checked+i:after {
+  transform:translateX(13px)
+}
+.preference-toggle.small[aria-checked=true] i:after {
   transform:translateX(13px)
 }
 @media(max-width:620px) {

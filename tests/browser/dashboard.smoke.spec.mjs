@@ -89,24 +89,68 @@ test('show note path toggle keeps settings open and only updates task metadata',
   await expect(page.locator('dialog[open] .preferences')).toBeVisible();
 
   const tasksVisibility = page.locator('[data-visibility="tasks"]');
-  const showPath = page.locator('[data-task-display="showPath"]');
+  const showPath = page.getByRole('switch', { name: 'Show note path' });
   await expect(tasksVisibility).toBeChecked();
-  await expect(showPath).toBeChecked();
+  await expect(showPath).toHaveAttribute('aria-checked', 'true');
+  await page.locator('#modal').evaluate(element => { element.dataset.regressionIdentity = 'original'; });
 
   await showPath.click();
 
   await expect(page.locator('dialog[open] .preferences')).toBeVisible();
   await expect(page.locator('dialog[open] .preferences main')).not.toBeEmpty();
+  await expect(page.locator('#modal')).toHaveAttribute('data-regression-identity', 'original');
   await expect(tasksVisibility).toBeChecked();
-  await expect(showPath).not.toBeChecked();
+  await expect(showPath).toHaveAttribute('aria-checked', 'false');
   await expect(page.locator('[data-card-key="tasks"] [data-task-meta]').first()).toHaveText('L7');
 
   await showPath.click();
 
   await expect(page.locator('dialog[open] .preferences')).toBeVisible();
   await expect(tasksVisibility).toBeChecked();
-  await expect(showPath).toBeChecked();
+  await expect(showPath).toHaveAttribute('aria-checked', 'true');
   await expect(page.locator('[data-card-key="tasks"] [data-task-meta]').first()).toContainText('Daily/Smoke.md');
+  expect(failures()).toEqual([]);
+});
+
+test('show note path storage failure rolls back without emptying settings', async ({ page }) => {
+  const failures = browserFailureCollector(page);
+  await page.goto('/');
+  await page.getByRole('button', { name: /Settings/ }).click();
+  await page.getByRole('button', { name: /Appearance/ }).click();
+
+  const showPath = page.getByRole('switch', { name: 'Show note path' });
+  await expect(showPath).toHaveAttribute('aria-checked', 'true');
+  await page.evaluate(() => {
+    window.__lifeyOriginalStorageSetItem = Storage.prototype.setItem;
+    Storage.prototype.setItem = () => { throw new DOMException('Storage full', 'QuotaExceededError'); };
+  });
+
+  await showPath.click();
+
+  await expect(page.locator('dialog[open] .preferences')).toBeVisible();
+  await expect(page.locator('dialog[open] .preferences main')).not.toBeEmpty();
+  await expect(showPath).toHaveAttribute('aria-checked', 'true');
+  await expect(page.locator('dialog[open] .modal-error')).toContainText('could not save this setting');
+  await page.evaluate(() => { Storage.prototype.setItem = window.__lifeyOriginalStorageSetItem; });
+  expect(failures()).toEqual([]);
+});
+
+test('show note path visible switch remains usable in mobile settings', async ({ page }) => {
+  const failures = browserFailureCollector(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+  await page.locator('[data-action="settings"]').evaluate(button => button.click());
+  await page.getByRole('button', { name: /Appearance/ }).click();
+
+  const modal = page.locator('dialog[open] .preferences');
+  const showPath = page.getByRole('switch', { name: 'Show note path' });
+  await expect(modal).toBeVisible();
+  await expect(showPath).toHaveAttribute('aria-checked', 'true');
+  await showPath.click();
+
+  await expect(modal).toBeVisible();
+  await expect(page.locator('dialog[open] .preferences main')).not.toBeEmpty();
+  await expect(showPath).toHaveAttribute('aria-checked', 'false');
   expect(failures()).toEqual([]);
 });
 

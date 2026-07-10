@@ -262,7 +262,7 @@ test('preference controller delegates app update maintenance actions', async () 
   assert.deepEqual(calls, ['check', 'Lifey is up to date.', 'clear']);
 });
 
-test('preference task path toggle updates in place without rerendering settings', () => {
+test('preference task path switch updates in place without rerendering settings', () => {
   const calls = [];
   const ctx = {
     state: { taskDisplay: { showPath: true } },
@@ -271,17 +271,45 @@ test('preference task path toggle updates in place without rerendering settings'
     rerenderPreferences: () => calls.push('rerenderPreferences'),
     updateTaskPathVisibility: () => calls.push('updateTaskPathVisibility'),
   };
-  const event = {
-    target: { dataset: { taskDisplay: 'showPath' }, checked: false },
-    stopPropagation: () => calls.push('stopPropagation'),
-    stopImmediatePropagation: () => calls.push('stopImmediatePropagation'),
+  const button = {
+    dataset: { taskDisplay: 'showPath' },
+    getAttribute: name => name === 'aria-checked' ? 'true' : null,
+    setAttribute: (name, value) => calls.push(`${name}:${value}`),
   };
 
-  const handled = handlePreferenceChange(event, ctx);
+  const handled = handlePreferenceAction('toggle-task-path', button, ctx);
 
   assert.equal(handled, true);
   assert.equal(ctx.state.taskDisplay.showPath, false);
-  assert.deepEqual(calls, ['stopPropagation', 'stopImmediatePropagation', 'persist', 'updateTaskPathVisibility']);
+  assert.deepEqual(calls, ['aria-checked:false', 'updateTaskPathVisibility', 'persist']);
+});
+
+test('preference task path switch rolls back and keeps settings usable when persistence fails', () => {
+  const calls = [];
+  const ctx = {
+    state: { taskDisplay: { showPath: false } },
+    persist: () => { throw new DOMException('Storage full', 'QuotaExceededError'); },
+    updateTaskPathVisibility: () => calls.push('updateTaskPathVisibility'),
+    reportPreferenceError: error => calls.push(`reported:${error.name}`),
+    showDialogError: message => calls.push(`error:${message}`),
+  };
+  const button = {
+    getAttribute: name => name === 'aria-checked' ? 'false' : null,
+    setAttribute: (name, value) => calls.push(`${name}:${value}`),
+  };
+
+  const handled = handlePreferenceAction('toggle-task-path', button, ctx);
+
+  assert.equal(handled, true);
+  assert.equal(ctx.state.taskDisplay.showPath, false);
+  assert.deepEqual(calls.slice(0, 5), [
+    'aria-checked:true',
+    'updateTaskPathVisibility',
+    'reported:QuotaExceededError',
+    'aria-checked:false',
+    'updateTaskPathVisibility',
+  ]);
+  assert.match(calls.at(-1), /^error:Lifey could not save this setting/);
 });
 
 test('location controller switches view and requests location reload', async () => {
