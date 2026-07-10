@@ -1,4 +1,4 @@
-const ASSET_VERSION = '4e1af6c6285a';
+const ASSET_VERSION = 'f8d3668669a9';
 const CACHE = `lifey-shell-v${ASSET_VERSION}`;
 // Generated from index.html, imported JS modules, and manifest.webmanifest.
 const SHELL = [

@@ -14,7 +14,8 @@ test.beforeEach(async ({ context }) => {
           priority: 'normal'
         }
       ],
-      suggestions: []
+      suggestions: [],
+      taskDate: '2026-01-01'
     };
     localStorage.clear();
     localStorage.setItem('lifey-state', JSON.stringify(state));
