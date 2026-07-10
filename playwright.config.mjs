@@ -1,5 +1,7 @@
 import { defineConfig, devices } from '@playwright/test';
 
+const port = Number(process.env.LIFEY_TEST_PORT || 4174);
+
 export default defineConfig({
   testDir: './tests/browser',
   timeout: 30_000,
@@ -7,13 +9,15 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     ...devices['Desktop Chrome'],
-    baseURL: 'http://127.0.0.1:4173',
+    baseURL: `http://127.0.0.1:${port}`,
     trace: 'retain-on-failure'
   },
   webServer: {
-    command: 'python3 local_server.py',
-    url: 'http://127.0.0.1:4173',
-    reuseExistingServer: true,
+    command: `LIFEY_PORT=${port} python3 local_server.py`,
+    url: `http://127.0.0.1:${port}`,
+    reuseExistingServer: false,
+    stdout: 'ignore',
+    stderr: 'ignore',
     timeout: 15_000
   }
 });

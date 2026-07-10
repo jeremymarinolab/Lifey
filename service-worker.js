@@ -1,4 +1,5 @@
-const CACHE = 'lifey-shell-ve10627852f9e';
+const ASSET_VERSION = '4e1af6c6285a';
+const CACHE = `lifey-shell-v${ASSET_VERSION}`;
 // Generated from index.html, imported JS modules, and manifest.webmanifest.
 const SHELL = [
   './',
@@ -27,6 +28,7 @@ const SHELL = [
   './app.js',
   './js/actions.js',
   './js/api.js',
+  './js/app-updates.js',
   './js/features/calendar/calendar.js',
   './js/features/capture/capture.js',
   './js/features/capture/controller.js',
@@ -54,7 +56,12 @@ self.addEventListener('activate', event => event.waitUntil(
   caches.keys()
     .then(keys => Promise.all(keys.filter(key => key !== CACHE).map(key => caches.delete(key))))
     .then(() => self.clients.claim())
+    .then(() => self.clients.matchAll({ type: 'window', includeUncontrolled: true }))
+    .then(clients => clients.forEach(client => client.postMessage({ type: 'LIFEY_ACTIVATED', version: ASSET_VERSION })))
 ));
+self.addEventListener('message', event => {
+  if (event.data?.type === 'LIFEY_GET_VERSION') event.source?.postMessage({ type: 'LIFEY_VERSION', version: ASSET_VERSION });
+});
 self.addEventListener('fetch', event => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);

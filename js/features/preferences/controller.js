@@ -6,6 +6,8 @@ const PREFERENCE_ACTIONS = new Set([
   'export-profile',
   'import-profile',
   'confirm-profile-import',
+  'check-app-update',
+  'clear-app-cache',
   'set-suggestion-count',
   'set-youtube-card-size',
   'add-habit-period',
@@ -29,6 +31,8 @@ export function handlePreferenceAction(action, button, ctx) {
   }
   if (action === 'export-profile') ctx.exportProfile().then(() => ctx.toast('Lifey profile exported without secrets.')).catch(error => ctx.toast(error.message));
   if (action === 'import-profile') ctx.importProfileFile();
+  if (action === 'check-app-update') ctx.checkForAppUpdate().then(result => ctx.toast(result.status === 'current' ? 'Lifey is up to date.' : 'Update check finished.')).catch(error => ctx.toast(error.message));
+  if (action === 'clear-app-cache') ctx.clearAppCacheAndReload().catch(error => ctx.toast(error.message));
   if (action === 'confirm-profile-import') {
     const bundle = window.pendingProfileImport;
     if (!bundle) return ctx.toast('Choose a Lifey profile file first.'), true;

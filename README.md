@@ -187,6 +187,10 @@ Do not edit the service worker shell list by hand.
 
 The script hashes those files, updates the version query strings, and rewrites the generated shell block in `service-worker.js`. `npm run check` fails if the asset version is stale or if a referenced local shell asset is missing.
 
+`js/app-updates.js` compares the version embedded in the loaded page with the version reported by the controlling service worker. When a new worker activates, Lifey announces the update and reloads once; a per-version session guard prevents reload loops. Settings → Profile shows both versions and includes controls to check for updates or clear only Lifey's app-shell caches.
+
+Browser tests run their local helper on port `4174` by default so they do not reuse or interrupt the normal Lifey server on port `4173`. Set `LIFEY_TEST_PORT` to override the test port.
+
 ## Tests
 
 Python tests live in `tests/test_local_server.py`.
