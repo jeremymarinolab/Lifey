@@ -70,6 +70,11 @@ test('quick capture and settings modal workflows are wired', async ({ page }) =>
   await expect(page.getByRole('button', { name: /Integrations/ })).toBeVisible();
   await page.getByRole('button', { name: /Appearance/ }).click();
   await expect(page.getByRole('heading', { name: 'Appearance' })).toBeVisible();
+  await page.getByRole('button', { name: /Profile/ }).click();
+  await expect(page.getByRole('heading', { name: 'Backup and transfer' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Version and cache' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Check for updates' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Clear app cache and reload' })).toBeVisible();
 });
 
 test('show note path toggle keeps settings open and only updates task metadata', async ({ page }) => {
@@ -117,7 +122,7 @@ test('service worker registers for the app shell', async ({ page }) => {
     };
   });
 
-  expect(registration?.scope).toContain('127.0.0.1:4173');
+  expect(registration?.scope).toBe(new URL('/', page.url()).href);
   expect(registration?.scriptURL).toContain('/service-worker.js');
 });
 

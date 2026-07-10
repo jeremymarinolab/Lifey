@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
+import { createAppUpdateManager, isLifeyShellCache, updateDecision } from '../../js/app-updates.js';
 import { eventMinutesFromDrag, eventPatchFromMinutes, normalizeCalendarScale, normalizeTimedCalendarEvent, timelineHeight } from '../../js/features/calendar/calendar.js';
 import { parseNaturalTask } from '../../js/features/capture/capture.js';
 import { habitPeriod, habitStreak, isMissedHabit, timeToMinutes } from '../../js/features/habits/habits.js';
@@ -164,6 +165,35 @@ test('API response normalizers reject bad shapes and preserve valid data', () =>
   assert.equal(youtube.days[0].videos[0].activeSeconds, 30);
 });
 
+test('app update decisions reload once per worker version and preserve capture drafts', () => {
+  assert.equal(updateDecision({ loadedVersion: 'v1', workerVersion: 'v1' }), 'current');
+  assert.equal(updateDecision({ loadedVersion: 'v1', workerVersion: 'v2' }), 'reload');
+  assert.equal(updateDecision({ loadedVersion: 'v1', workerVersion: 'v2', hasUnsavedCapture: true }), 'prompt');
+  assert.equal(updateDecision({ loadedVersion: 'v1', workerVersion: 'v2', reloadTarget: 'v2' }), 'recovery');
+  assert.equal(isLifeyShellCache('lifey-shell-v123'), true);
+  assert.equal(isLifeyShellCache('other-cache'), false);
+});
+
+test('app cache recovery deletes only Lifey shell caches before reloading', async () => {
+  const deleted = [];
+  let reloads = 0;
+  const manager = createAppUpdateManager({
+    loadedVersion: 'v1',
+    navigatorObject: {},
+    cacheStorage: {
+      keys: async () => ['lifey-shell-v1', 'lifey-shell-v2', 'other-cache'],
+      delete: async key => { deleted.push(key); return true; },
+    },
+    sessionStore: { removeItem: () => {} },
+    reload: () => { reloads += 1; },
+  });
+
+  await manager.clearAppCacheAndReload();
+
+  assert.deepEqual(deleted, ['lifey-shell-v1', 'lifey-shell-v2']);
+  assert.equal(reloads, 1);
+});
+
 test('project controller mutates expanded project state and persists', () => {
   const calls = [];
   const ctx = {
@@ -209,6 +239,22 @@ test('preference controller updates display state without DOM dependencies', () 
   assert.equal(handlePreferenceAction('set-suggestion-count', { dataset: { count: '3' } }, ctx), true);
   assert.equal(ctx.state.contentDisplay.limit, 3);
   assert.deepEqual(calls, ['persist', 'rerender:appearance:42']);
+});
+
+test('preference controller delegates app update maintenance actions', async () => {
+  const calls = [];
+  const ctx = {
+    checkForAppUpdate: async () => { calls.push('check'); return { status: 'current' }; },
+    clearAppCacheAndReload: async () => calls.push('clear'),
+    toast: message => calls.push(message),
+  };
+
+  assert.equal(handlePreferenceAction('check-app-update', { dataset: {} }, ctx), true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(handlePreferenceAction('clear-app-cache', { dataset: {} }, ctx), true);
+  await new Promise(resolve => setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, ['check', 'Lifey is up to date.', 'clear']);
 });
 
 test('preference task path toggle updates in place without rerendering settings', () => {

@@ -794,6 +794,58 @@ pre {
   opacity:1;
   translate:-50% 0
 }
+.app-update-banner {
+  position:fixed;
+  top:max(18px, env(safe-area-inset-top));
+  left:50%;
+  z-index:100001;
+  width:min(620px, calc(100vw - 32px));
+  translate:-50% 0;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:18px;
+  padding:13px 14px 13px 17px;
+  border:1px solid rgba(235, 249, 239, .24);
+  border-radius:var(--ui-radius, 24px);
+  background:linear-gradient(145deg, rgba(92, 119, 108, .94), rgba(29, 48, 43, .94));
+  box-shadow:inset 0 1px 0 rgba(255, 255, 255, .2), 0 20px 55px rgba(11, 24, 21, .38);
+  backdrop-filter:blur(22px) saturate(130%);
+  -webkit-backdrop-filter:blur(22px) saturate(130%);
+  animation:app-update-enter .28s ease-out both
+}
+.app-update-banner.recovery {
+  border-color:rgba(255, 145, 124, .38);
+  background:linear-gradient(145deg, rgba(102, 70, 61, .96), rgba(46, 34, 31, .96))
+}
+.app-update-banner div {
+  min-width:0;
+  display:grid;
+  gap:2px
+}
+.app-update-banner strong {
+  color:var(--ink);
+  font-size:13px
+}
+.app-update-banner span {
+  color:rgba(235, 249, 239, .7);
+  font-size:11px
+}
+.app-update-banner button {
+  flex:none;
+  min-height:36px;
+  border:1px solid rgba(255, 255, 255, .2);
+  border-radius:var(--button-radius, 14px);
+  background:rgba(255, 255, 255, .14);
+  color:var(--ink);
+  padding:8px 12px;
+  font:700 11px 'DM Sans';
+  cursor:pointer
+}
+@keyframes app-update-enter {
+  from { opacity:0; translate:-50% -12px }
+  to { opacity:1; translate:-50% 0 }
+}
 @media(max-width:900px) {
   .shell {
     padding:0 20px 40px

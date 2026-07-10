@@ -385,6 +385,49 @@ nav {
   padding:5px 8px;
   background:rgba(255, 255, 255, .05)
 }
+.app-update-settings dl {
+  margin:0;
+  display:grid;
+  border:1px solid var(--line);
+  border-radius:var(--button-radius, 14px);
+  overflow:hidden;
+  background:rgba(13, 29, 25, .2)
+}
+.app-update-settings dl div {
+  min-width:0;
+  display:grid;
+  grid-template-columns:minmax(110px, .7fr) minmax(0, 1.3fr);
+  align-items:center;
+  gap:16px;
+  padding:11px 13px;
+  border-bottom:1px solid var(--line)
+}
+.app-update-settings dl div:last-child {
+  border-bottom:0
+}
+.app-update-settings dt {
+  color:var(--muted);
+  font-size:11px
+}
+.app-update-settings dd {
+  min-width:0;
+  margin:0;
+  color:var(--ink);
+  font:500 10px 'DM Mono';
+  overflow-wrap:anywhere
+}
+.app-update-actions {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-top:12px
+}
+.app-update-settings>small {
+  display:block;
+  margin-top:10px;
+  color:var(--muted);
+  line-height:1.45
+}
 .radius-settings {
   display:grid;
   gap:16px

@@ -947,15 +947,16 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     lan_enabled = os.environ.get("LIFEY_LAN", "").lower() in {"1", "true", "yes"}
+    port = int(os.environ.get("LIFEY_PORT", "4173"))
     local_host = "0.0.0.0" if lan_enabled else "127.0.0.1"
-    local_server = ThreadingHTTPServer((local_host, 4173), Handler)
+    local_server = ThreadingHTTPServer((local_host, port), Handler)
     tailnet_address = None if lan_enabled else tailscale_ipv4()
     if tailnet_address:
-        tailnet_server = ThreadingHTTPServer((tailnet_address, 4173), Handler)
+        tailnet_server = ThreadingHTTPServer((tailnet_address, port), Handler)
         threading.Thread(target=tailnet_server.serve_forever, daemon=True).start()
-        print(f"Lifey → http://127.0.0.1:4173\nLifey on your private Tailscale network → http://{tailnet_address}:4173")
+        print(f"Lifey → http://127.0.0.1:{port}\nLifey on your private Tailscale network → http://{tailnet_address}:{port}")
     else:
-        print("Lifey → http://127.0.0.1:4173")
+        print(f"Lifey → http://127.0.0.1:{port}")
     if lan_enabled:
-        print("Lifey on this Wi‑Fi/LAN → http://YOUR-MAC-WIFI-IP:4173")
+        print(f"Lifey on this Wi‑Fi/LAN → http://YOUR-MAC-WIFI-IP:{port}")
     local_server.serve_forever()

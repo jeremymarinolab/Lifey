@@ -267,6 +267,20 @@
   #toast.show {
     translate:0 0
   }
+
+  .app-update-banner {
+    top:calc(12px + env(safe-area-inset-top));
+    width:calc(100vw - 24px);
+    align-items:stretch;
+    flex-direction:column;
+    gap:10px;
+    padding:14px
+  }
+
+  .app-update-banner button {
+    width:100%;
+    min-height:42px
+  }
 }
 
 @media (display-mode:standalone) {

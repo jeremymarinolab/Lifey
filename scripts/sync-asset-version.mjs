@@ -115,8 +115,16 @@ function replaceAssetVersions(html, version, versionedAssets) {
   return next;
 }
 
-function replaceCacheVersion(worker, version) {
-  return worker.replace(/const CACHE = 'lifey-shell-v[^']+';/, `const CACHE = 'lifey-shell-v${version}';`);
+function replaceAssetVersionMeta(html, version) {
+  const pattern = /<meta name="lifey-asset-version" content="[^"]+"\s*\/?>/;
+  if (!pattern.test(html)) throw new Error('index.html lifey-asset-version meta tag was not found.');
+  return html.replace(pattern, `<meta name="lifey-asset-version" content="${version}" />`);
+}
+
+function replaceWorkerVersion(worker, version) {
+  const pattern = /const ASSET_VERSION = '[^']+';/;
+  if (!pattern.test(worker)) throw new Error('service-worker.js ASSET_VERSION was not found.');
+  return worker.replace(pattern, `const ASSET_VERSION = '${version}';`);
 }
 
 function shellEntries(shellAssets) {
@@ -139,9 +147,9 @@ const worker = read('service-worker.js').toString();
 const versionedAssets = versionedAssetGraph(html);
 const shellAssets = shellAssetGraph(html);
 const version = assetVersion(shellAssets);
-const nextWorker = replaceShellAssets(replaceCacheVersion(worker, version), shellAssets);
+const nextWorker = replaceShellAssets(replaceWorkerVersion(worker, version), shellAssets);
 const files = [
-  ['index.html', replaceAssetVersions(html, version, versionedAssets)],
+  ['index.html', replaceAssetVersionMeta(replaceAssetVersions(html, version, versionedAssets), version)],
   ['service-worker.js', nextWorker]
 ];
 
