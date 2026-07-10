@@ -1,7 +1,7 @@
 import { actionPayload, actionTarget } from './js/actions.js';
 import { localRequest } from './js/api.js';
 import { appUpdates } from './js/app-updates.js';
-import { eventGeometry, eventMinutesFromDrag, eventPatchFromMinutes, normalizeCalendarScale, normalizeTimedCalendarEvent, timeLabelFromMinutes, timelineHeight, timelineTicks } from './js/features/calendar/calendar.js';
+import { calendarEmptyMessage, eventGeometry, eventMinutesFromDrag, eventPatchFromMinutes, normalizeCalendarScale, normalizeTimedCalendarEvent, timeLabelFromMinutes, timelineHeight, timelineTicks } from './js/features/calendar/calendar.js';
 import { CAPTURE_PRIORITIES, CAPTURE_RECURRENCES, captureDayTimeLabel, capturePriorityLabel, captureRecurringLabel, parseNaturalTask, taskCaptureValues } from './js/features/capture/capture.js';
 import { handleCaptureAction, handleCaptureInput, handleCaptureKeydown } from './js/features/capture/controller.js';
 import { DEFAULT_HABIT_SETTINGS, habitPeriod as habitPeriodForSettings, habitPeriodLabel as habitPeriodLabelForSettings, habitPeriodMeta as habitPeriodMetaForSettings, habitPeriods as habitPeriodsForSettings, habitStreak as habitStreakForState, isMissedHabit as isMissedHabitForState, timeToMinutes, zonedParts as zonedPartsForSettings } from './js/features/habits/habits.js';
@@ -732,7 +732,7 @@ function archivedHabitPanel(habit, entries = [], range = 'month') {
   const totals = [...new Set(habitEntries.map(entry => entry.date))].map(date => ({ date, completed: habitEntries.some(entry => entry.date === date && entry.state === 'completed') ? 1 : 0, scheduled: habitEntries.some(entry => entry.date === date) ? 1 : 0 }));
   return `<div class="archived-habit"><button data-action="toggle-archived-habit" data-habit="${escape(habit.habit)}"><span>${escape(habit.habit)}</span><small>${escape(habit.status || 'archived')}</small><b>${open ? '⌃' : '⌄'}</b></button>${open ? `<div class="archived-habit-detail">${habitCalendar(habit.habit, entries, range)}${habitGraph(totals, range)}</div>` : ''}</div>`;
 }
-function renderCalendarTimeline(events, scale) {
+function renderCalendarTimeline(events, scale, emptyMessage = '') {
   const height = timelineHeight(scale);
   const ticks = timelineTicks(scale).map(tick => `<div class="calendar-tick" style="top:${tick.top}px"><span>${escape(tick.label)}</span></div>`).join('');
   const blocks = events.map(event => {
@@ -746,7 +746,7 @@ function renderCalendarTimeline(events, scale) {
   }).join('');
   return `<div class="calendar-timeline" style="--calendar-height:${height}px;--calendar-px-hour:${scale.pxPerHour};--calendar-snap:${scale.snapMinutes}">
     <div class="calendar-time-axis">${ticks}</div>
-    <div class="calendar-lane">${blocks || emptyState('Connect Google Calendar to show today’s events.')}</div>
+    <div class="calendar-lane">${blocks || (emptyMessage ? emptyState(emptyMessage) : '')}</div>
   </div>`;
 }
 function calendarEventById(eventId) {
@@ -940,7 +940,7 @@ function render() {
       eyebrow: 'GOOGLE CALENDAR',
       title: 'Day in motion',
       status: badge(calendarStatusLabel, state.google.connected ? 'exact' : 'estimated'),
-      body: `${allDayEvents.length ? `<div class="all-day-events">${allDayEvents.map(e => `<div class="all-day-event"><span>All day</span><strong>${escape(e.title)}</strong>${e.id ? iconButton('×', { className: 'event-delete', title: 'Delete Calendar event', ariaLabel: `Delete ${e.title}`, action: 'delete-calendar-event', attrs: { 'data-event-id': e.id } }) : ''}</div>`).join('')}</div>` : ''}${renderCalendarTimeline(timedCalendarEvents, calendarScale)}`,
+      body: `${allDayEvents.length ? `<div class="all-day-events">${allDayEvents.map(e => `<div class="all-day-event"><span>All day</span><strong>${escape(e.title)}</strong>${e.id ? iconButton('×', { className: 'event-delete', title: 'Delete Calendar event', ariaLabel: `Delete ${e.title}`, action: 'delete-calendar-event', attrs: { 'data-event-id': e.id } }) : ''}</div>`).join('')}</div>` : ''}${renderCalendarTimeline(timedCalendarEvents, calendarScale, calendarEmptyMessage(state.google.connected))}`,
       footer: `${button(calendarButtonLabel, { className: 'text-button', action: 'connect-google' })}${button('<span class="action-arrow">↗</span>Open today', { className: 'text-button', action: 'open-google-calendar' })}${button('＋ Create event', { className: 'text-button', action: 'create-event' })}`
     }),
     panelCard({

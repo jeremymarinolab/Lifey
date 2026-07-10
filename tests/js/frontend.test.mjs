@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import { createAppUpdateManager, isLifeyShellCache, updateDecision } from '../../js/app-updates.js';
-import { eventMinutesFromDrag, eventPatchFromMinutes, normalizeCalendarScale, normalizeTimedCalendarEvent, timelineHeight } from '../../js/features/calendar/calendar.js';
+import { calendarEmptyMessage, eventMinutesFromDrag, eventPatchFromMinutes, normalizeCalendarScale, normalizeTimedCalendarEvent, timelineHeight } from '../../js/features/calendar/calendar.js';
 import { parseNaturalTask } from '../../js/features/capture/capture.js';
 import { habitPeriod, habitStreak, isMissedHabit, timeToMinutes } from '../../js/features/habits/habits.js';
 import { durationLabel, placeDurationMilliseconds, totalTimeLabel } from '../../js/features/location/location.js';
@@ -76,6 +76,11 @@ test('calendar event patch keeps the source date and configured timezone', () =>
   assert.equal(patch.end.dateTime, '2026-07-08T14:00:00');
   assert.equal(patch.start.timeZone, 'America/Guayaquil');
   assert.equal(patch.end.timeZone, 'America/Guayaquil');
+});
+
+test('calendar empty prompt appears only while Google Calendar is disconnected', () => {
+  assert.equal(calendarEmptyMessage(false), 'Connect Google Calendar to show today’s events.');
+  assert.equal(calendarEmptyMessage(true), '');
 });
 
 test('parseNaturalTask extracts project, time, priority, recurrence, and effort metadata', () => {
