@@ -1,277 +1,108 @@
-"""Small, local-only server for Today Command Center.
+"""Small, local-only server for Lifey.
 
-It serves the dashboard and provides a deliberately narrow Obsidian adapter:
+It serves Lifey and provides a deliberately narrow Obsidian adapter:
 configure one Daily-notes folder, read today's note, and replace only the
 DASHBOARD marker block while saving a sibling backup. It never listens beyond
 127.0.0.1 and never sends vault contents anywhere.
 """
 from __future__ import annotations
 
-import base64
 import datetime as dt
-import gzip
 import hashlib
 import json
 import os
 import re
 import secrets
-import ssl
 import subprocess
 import threading
 import time
-import zlib
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode, urlparse
-from urllib import error as urlerror
-from urllib import request as urlrequest
+
+from activity_service import (
+    activity_log,
+    save_activity,
+    youtube_today as activity_youtube_today,
+    youtube_video_identity,
+    youtube_week as activity_youtube_week,
+)
+from archive_service import (
+    DEFAULT_ARCHIVE_TITLES,
+    DEFAULT_LOCATION_ARCHIVE_TEMPLATES,
+    archive_block,
+    has_archive_markers,
+)
+from config_store import (
+    PROFILE_PREFERENCE_FIELDS,
+    config,
+    save_config,
+    strip_profile_secrets,
+)
+from google_client import (
+    GOOGLE_REDIRECT_URI,
+    google_auth_url,
+    google_calendar_create,
+    google_calendar_delete,
+    google_calendar_today,
+    google_calendar_update,
+    google_finish_auth,
+    google_gmail_suggestions,
+    google_oauth_status,
+)
+from habit_service import habit_history, habits_today, sync_today_habits, update_today_habit
+from location_service import distance_meters, human_duration, parse_stamp, period_bounds, place_duration_seconds
+from notion_client import notion_data_source, notion_request, notion_title
+from obsidian_repo import (
+    daily_file,
+    daily_names,
+    journals_folder,
+    line_in_habit_section,
+    note_safe_name,
+    resolve_obsidian_root,
+    wiki_place,
+)
+from places_service import (
+    add_mobile_location_samples,
+    grouping_radius,
+    location_collector_token,
+    location_places,
+    location_positions,
+    mobile_location_samples,
+    top_places,
+    traccar_positions,
+    traccar_request,
+    week_location_data,
+)
+from profile_service import PROFILE_EXCLUDED_SECRETS, clean_profile_import, profile_export_bundle
+from project_service import create_project_note, open_project_note, projects_summary, update_project_task
+from routes import ApiError, ApiResponse, RouteRegistry
+from routes import origin_allowed as route_origin_allowed
+from routes import read_json_body, request_allowed as route_request_allowed, validate_json_body
+from task_service import insert_task_under_tasks, target_note_for_new_task
 
 ROOT = Path(__file__).resolve().parent
-LEGACY_CONFIG = ROOT / ".local-dashboard.json"
-CONFIG = Path.home() / "Library" / "Application Support" / "Lifey" / "profile.json"
 ACTIVITY = ROOT / ".activity-log.json"
-MOBILE_LOCATIONS = Path.home() / "Library" / "Application Support" / "Lifey" / "location-samples.json"
-START = END = "---"
-LEGACY_START, LEGACY_END = "<!-- DASHBOARD:START -->", "<!-- DASHBOARD:END -->"
-SSL_CONTEXT = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
-LAST_NOMINATIM_REQUEST = 0.0
-DEFAULT_LOCATION_ARCHIVE_TEMPLATES = {
-    "weekly": "---\n## Lifey · {{period}}\n\n### Top places\n{{topPlaces}}\n\n### Days\n{{dailyPlaces}}\n---",
-    "monthly": "---\n## Lifey · {{period}}\n\n### Top places\n{{topPlaces}}\n---",
-    "yearly": "---\n## Lifey · {{period}}\n\n### Top places\n{{topPlaces}}\n---",
-}
-DEFAULT_ARCHIVE_TITLES = {
-    "daily": "Lifey · MMMM DD, YYYY",
-    "weekly": "Lifey · {{period}}",
-    "monthly": "Lifey · {{period}}",
-    "yearly": "Lifey · {{period}}",
-}
-SECRET_FIELDS = {"notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleRefreshToken", "googleClientSecret"}
-KEYCHAIN_SERVICE = "Lifey"
-PROFILE_PREFERENCE_FIELDS = {"appearance", "visibility", "taskDisplay", "contentDisplay", "heroMetricOrder", "heroMetricVisibility", "cardOrder", "integrations", "habitSettings"}
-PROFILE_SECRET_KEYS = {"token", "accessToken", "refreshToken", "notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleClientSecret", "clientSecret", "password", "secret"}
-PROFILE_EXCLUDED_SECRETS = [
-    "notionToken",
-    "googlePlacesKey",
-    "traccarToken",
-    "lifeyLocationToken",
-    "googleRefreshToken",
-    "googleClientSecret",
-    "oauthAccessTokens",
-]
-GOOGLE_SCOPES = "openid email https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/gmail.readonly"
-GOOGLE_REDIRECT_URI = "http://127.0.0.1:4173/api/google/auth/callback"
+MOBILE_INGEST_RATE_WINDOW_SECONDS = 60
+MOBILE_INGEST_RATE_LIMIT = 30
+MOBILE_INGEST_RATE: dict[tuple[str, str], list[float]] = {}
+MOBILE_INGEST_RATE_LOCK = threading.Lock()
 
 
-def keychain_get(name: str) -> str:
-    try:
-        result = subprocess.run(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name, "-w"], capture_output=True, timeout=3, check=False)
-        if result.returncode != 0:
-            return ""
-        raw = result.stdout.rstrip(b"\r\n")
-        # Keychain passwords are normally UTF-8, but never allow one malformed
-        # legacy entry to take down an unrelated dashboard request.
-        try:
-            return raw.decode("utf-8")
-        except UnicodeDecodeError:
-            return raw.decode("latin-1")
-    except (OSError, subprocess.SubprocessError):
-        return ""
-
-
-def keychain_set(name: str, value: str) -> bool:
-    try:
-        result = subprocess.run(["security", "add-generic-password", "-U", "-s", KEYCHAIN_SERVICE, "-a", name, "-w", value], capture_output=True, text=True, timeout=3, check=False)
-        return result.returncode == 0
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def keychain_delete(name: str) -> bool:
-    try:
-        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name], capture_output=True, text=True, timeout=3, check=False)
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
-
-
-def config() -> dict:
-    try:
-        settings = json.loads((CONFIG if CONFIG.exists() else LEGACY_CONFIG).read_text())
-    except (OSError, json.JSONDecodeError):
-        settings = {}
-    for key in SECRET_FIELDS:
-        secret = keychain_get(key)
-        if secret:
-            settings[key] = secret
-    return settings
-
-
-def save_config(values: dict) -> None:
-    migrating_legacy = not CONFIG.exists() and LEGACY_CONFIG.exists()
-    current = config()
-    current.update(values)
-    persisted = dict(current)
-    for key in SECRET_FIELDS:
-        value = str(current.get(key) or "")
-        if key in values and not value:
-            keychain_delete(key)
-            persisted.pop(key, None)
-        elif value and keychain_set(key, value):
-            persisted.pop(key, None)
-    CONFIG.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG.write_text(json.dumps(persisted, indent=2))
-    if migrating_legacy:
-        try:
-            legacy = json.loads(LEGACY_CONFIG.read_text())
-            for key in SECRET_FIELDS:
-                if keychain_get(key):
-                    legacy.pop(key, None)
-            LEGACY_CONFIG.write_text(json.dumps(legacy, indent=2))
-        except (OSError, json.JSONDecodeError):
-            pass
-
-
-def strip_profile_secrets(value):
-    if isinstance(value, dict):
-        return {key: strip_profile_secrets(item) for key, item in value.items() if key not in PROFILE_SECRET_KEYS}
-    if isinstance(value, list):
-        return [strip_profile_secrets(item) for item in value]
-    return value
-
-
-def safe_profile_preferences(settings: dict) -> dict:
-    preferences = settings.get("profilePreferences", {})
-    if not isinstance(preferences, dict):
-        preferences = {}
-    clean = {key: preferences[key] for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
-    integrations = strip_profile_secrets(dict(clean.get("integrations", {}))) if isinstance(clean.get("integrations"), dict) else {}
-    if settings.get("notionParentId"):
-        notion = dict(integrations.get("notion", {})) if isinstance(integrations.get("notion"), dict) else {}
-        notion.setdefault("database", settings.get("notionParentId", ""))
-        notion.setdefault("dataSourceId", settings.get("notionDataSourceId", ""))
-        notion.setdefault("property", settings.get("notionTitleProperty", "Name"))
-        integrations["notion"] = strip_profile_secrets(notion)
-    if settings.get("traccarServer") or settings.get("traccarDeviceId"):
-        traccar = dict(integrations.get("traccar", {})) if isinstance(integrations.get("traccar"), dict) else {}
-        traccar.setdefault("server", settings.get("traccarServer", ""))
-        traccar.setdefault("deviceId", settings.get("traccarDeviceId", ""))
-        integrations["traccar"] = strip_profile_secrets(traccar)
-    if settings.get("googleClientId") or settings.get("googleCalendarId"):
-        google = dict(integrations.get("google", {})) if isinstance(integrations.get("google"), dict) else {}
-        google.setdefault("clientId", settings.get("googleClientId", ""))
-        google.setdefault("calendar", settings.get("googleCalendarId", "primary"))
-        integrations["google"] = strip_profile_secrets(google)
-    if settings.get("gmailQuery"):
-        gmail = dict(integrations.get("gmail", {})) if isinstance(integrations.get("gmail"), dict) else {}
-        gmail.setdefault("query", settings.get("gmailQuery", ""))
-        integrations["gmail"] = strip_profile_secrets(gmail)
-    if integrations:
-        clean["integrations"] = integrations
-    return strip_profile_secrets(clean)
-
-
-def profile_export_bundle() -> dict:
-    settings = config()
-    return {
-        "version": 1,
-        "app": "Lifey",
-        "exportedAt": dt.datetime.now(dt.timezone.utc).isoformat(),
-        "profile": {
-            "preferences": safe_profile_preferences(settings),
-            "archiveTemplate": settings.get("archiveTemplate", ""),
-            "locationArchiveTemplates": archive_templates(),
-            "archiveTitles": archive_titles(),
-            "obsidian": {"dailyNotesPath": settings.get("dailyNotesPath", "")},
-            "location": {
-                "radiusMeters": grouping_radius(),
-                "localPlaceLabels": settings.get("localPlaceLabels", []),
-                "placeMerges": settings.get("placeMerges", []),
-                "osmPlacesEnabled": bool(settings.get("osmPlacesEnabled")),
-            },
-        },
-        "excludedSecrets": PROFILE_EXCLUDED_SECRETS,
-    }
-
-
-def clean_profile_import(body: dict) -> dict:
-    profile = body.get("profile", body) if isinstance(body, dict) else {}
-    if not isinstance(profile, dict):
-        raise ValueError("Invalid Lifey profile.")
-    updates: dict = {}
-    preferences = profile.get("preferences", {})
-    if not isinstance(preferences, dict):
-        preferences = {}
-    clean_preferences = {key: strip_profile_secrets(preferences[key]) for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
-    if clean_preferences:
-        updates["profilePreferences"] = clean_preferences
-    archive_template = str(profile.get("archiveTemplate", "") or "").strip()
-    if archive_template:
-        if len(archive_template) > 20_000 or not has_archive_markers(archive_template):
-            raise ValueError("The daily archive template must begin and end with ---.")
-        updates["archiveTemplate"] = archive_template
-    location_templates = profile.get("locationArchiveTemplates")
-    if isinstance(location_templates, dict):
-        merged = {key: str(location_templates.get(key) or DEFAULT_LOCATION_ARCHIVE_TEMPLATES[key]).strip() for key in DEFAULT_LOCATION_ARCHIVE_TEMPLATES}
-        if any(not has_archive_markers(template) for template in merged.values()):
-            raise ValueError("Each location archive template must begin and end with ---.")
-        updates["locationArchiveTemplates"] = merged
-    titles = profile.get("archiveTitles")
-    if isinstance(titles, dict):
-        merged_titles = {key: str(titles.get(key) or DEFAULT_ARCHIVE_TITLES[key]).strip()[:160] for key in DEFAULT_ARCHIVE_TITLES}
-        if any(not value for value in merged_titles.values()):
-            raise ValueError("Every archive needs a title.")
-        updates["archiveTitles"] = merged_titles
-    obsidian = profile.get("obsidian")
-    if isinstance(obsidian, dict):
-        daily_path = str(obsidian.get("dailyNotesPath", "") or "").strip()
-        if daily_path:
-            updates["dailyNotesPath"] = daily_path[:2000]
-    location = profile.get("location")
-    if isinstance(location, dict):
-        if "radiusMeters" in location:
-            radius = int(location.get("radiusMeters", 50))
-            if not 20 <= radius <= 500:
-                raise ValueError("Location radius must be between 20 and 500 metres.")
-            updates["placeGroupingRadiusMeters"] = radius
-        labels = location.get("localPlaceLabels")
-        if isinstance(labels, list):
-            clean_labels = []
-            for label in labels[:500]:
-                if not isinstance(label, dict):
-                    continue
-                name = str(label.get("name", "")).strip()[:120]
-                try:
-                    latitude, longitude = float(label.get("latitude")), float(label.get("longitude"))
-                    radius = int(label.get("radiusMeters", 50))
-                except (TypeError, ValueError):
-                    continue
-                if name and -90 <= latitude <= 90 and -180 <= longitude <= 180:
-                    clean_labels.append({"name": name, "latitude": latitude, "longitude": longitude, "radiusMeters": max(20, min(500, radius))})
-            updates["localPlaceLabels"] = clean_labels
-        merges = location.get("placeMerges")
-        if isinstance(merges, list):
-            updates["placeMerges"] = strip_profile_secrets(merges[:500])
-        if "osmPlacesEnabled" in location:
-            updates["osmPlacesEnabled"] = bool(location.get("osmPlacesEnabled"))
-    if not updates:
-        raise ValueError("No importable Lifey settings were found.")
-    return updates
-
-
-def has_archive_markers(text: str) -> bool:
-    lines = text.strip().splitlines()
-    return len(lines) >= 2 and lines[0].strip() == START and lines[-1].strip() == END
-
-
-def archive_block(text: str) -> re.Pattern[str] | None:
-    legacy = re.compile(re.escape(LEGACY_START) + r"[\s\S]*?" + re.escape(LEGACY_END))
-    if legacy.search(text):
-        return legacy
-    # A divider followed by the archive heading makes the simple Markdown markers safe to find.
-    modern = re.compile(r"^---[ \t]*\r?\n(?=## Lifey\b)[\s\S]*?^---[ \t]*$", re.MULTILINE)
-    return modern if modern.search(text) else None
+def mobile_ingest_retry_after(client: str, token: str, now: float | None = None) -> int:
+    """Return seconds to wait when this collector is over the ingest request rate."""
+    timestamp = time.time() if now is None else now
+    token_fingerprint = hashlib.sha256(token.encode()).hexdigest()[:16]
+    key = (client, token_fingerprint)
+    with MOBILE_INGEST_RATE_LOCK:
+        recent = [item for item in MOBILE_INGEST_RATE.get(key, []) if timestamp - item < MOBILE_INGEST_RATE_WINDOW_SECONDS]
+        if len(recent) >= MOBILE_INGEST_RATE_LIMIT:
+            MOBILE_INGEST_RATE[key] = recent
+            return max(1, int(MOBILE_INGEST_RATE_WINDOW_SECONDS - (timestamp - recent[0])))
+        recent.append(timestamp)
+        MOBILE_INGEST_RATE[key] = recent
+    return 0
 
 
 def tailscale_ipv4() -> str | None:
@@ -282,1334 +113,6 @@ def tailscale_ipv4() -> str | None:
         return address if re.fullmatch(r"100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}", address) else None
     except (OSError, subprocess.SubprocessError, IndexError):
         return None
-
-
-def activity_log() -> dict:
-    try:
-        return json.loads(ACTIVITY.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-
-
-def save_activity(values: dict) -> None:
-    ACTIVITY.write_text(json.dumps(values, indent=2))
-
-
-def quote_path(value: str) -> str:
-    return urlencode({"": value})[1:]
-
-
-def base64url_bytes(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
-
-
-def google_oauth_status(settings: dict | None = None) -> dict:
-    settings = settings or config()
-    return {
-        "configured": bool(google_client_id(settings)),
-        "hasClientSecret": bool(google_client_secret(settings)),
-        "connected": bool(settings.get("googleRefreshToken")),
-        "email": settings.get("googleAccountEmail", ""),
-        "calendar": google_calendar_id(settings),
-        "gmailQuery": google_gmail_query(settings),
-        "clientId": google_client_id(settings),
-    }
-
-
-def google_client_id(settings: dict | None = None) -> str:
-    settings = settings or config()
-    return str(settings.get("googleClientId") or settings.get("profilePreferences", {}).get("integrations", {}).get("google", {}).get("clientId") or "").strip()
-
-
-def google_client_secret(settings: dict | None = None) -> str:
-    settings = settings or config()
-    return str(settings.get("googleClientSecret", "")).strip()
-
-
-def google_calendar_id(settings: dict | None = None) -> str:
-    settings = settings or config()
-    return str(settings.get("googleCalendarId") or settings.get("profilePreferences", {}).get("integrations", {}).get("google", {}).get("calendar") or "primary").strip() or "primary"
-
-
-def google_gmail_query(settings: dict | None = None) -> str:
-    settings = settings or config()
-    return str(settings.get("gmailQuery") or settings.get("profilePreferences", {}).get("integrations", {}).get("gmail", {}).get("query") or "newer_than:14d (medium OR newsletter)").strip()
-
-
-def google_oauth_request(payload: dict) -> dict:
-    body = urlencode(payload).encode()
-    req = urlrequest.Request("https://oauth2.googleapis.com/token", data=body, method="POST", headers={"Content-Type": "application/x-www-form-urlencoded"})
-    try:
-        with urlrequest.urlopen(req, context=SSL_CONTEXT, timeout=12) as response:
-            return json.loads(response.read())
-    except urlerror.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ValueError(f"Google OAuth failed ({error.code}): {detail}")
-
-
-def google_api_request(method: str, url: str, token: str, payload: dict | None = None) -> dict:
-    data = json.dumps(payload).encode() if payload is not None else None
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    if payload is not None:
-        headers["Content-Type"] = "application/json"
-    req = urlrequest.Request(url, data=data, method=method, headers=headers)
-    try:
-        with urlrequest.urlopen(req, context=SSL_CONTEXT, timeout=15) as response:
-            raw = response.read()
-            return json.loads(raw) if raw else {}
-    except urlerror.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        if error.code == 401:
-            raise ValueError("Google authorization expired. Reconnect Google on this Mac.")
-        raise ValueError(f"Google API failed ({error.code}): {detail}")
-
-
-def google_access_token() -> str:
-    settings = config()
-    client_id = google_client_id(settings)
-    refresh_token = str(settings.get("googleRefreshToken", "")).strip()
-    if not client_id:
-        raise ValueError("Add a Google Desktop OAuth Client ID first.")
-    if not refresh_token:
-        raise ValueError("Connect Google on this Mac first.")
-    payload = {"client_id": client_id, "refresh_token": refresh_token, "grant_type": "refresh_token"}
-    if google_client_secret(settings):
-        payload["client_secret"] = google_client_secret(settings)
-    token = google_oauth_request(payload)
-    access_token = token.get("access_token")
-    if not access_token:
-        raise ValueError("Google did not return an access token. Reconnect Google on this Mac.")
-    return access_token
-
-
-def google_auth_url() -> str:
-    settings = config()
-    client_id = google_client_id(settings)
-    if not client_id:
-        raise ValueError("Add a Google Desktop OAuth Client ID first.")
-    if not google_client_secret(settings):
-        raise ValueError("Add and save the Google Desktop OAuth Client Secret first.")
-    verifier = base64url_bytes(secrets.token_bytes(64))
-    challenge = base64url_bytes(hashlib.sha256(verifier.encode()).digest())
-    state = secrets.token_urlsafe(24)
-    save_config({"googleOAuthState": state, "googleCodeVerifier": verifier, "googleRedirectUri": GOOGLE_REDIRECT_URI})
-    return "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
-        "client_id": client_id,
-        "redirect_uri": GOOGLE_REDIRECT_URI,
-        "response_type": "code",
-        "scope": GOOGLE_SCOPES,
-        "access_type": "offline",
-        "prompt": "consent",
-        "state": state,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-    })
-
-
-def google_finish_auth(query: dict[str, list[str]]) -> str:
-    settings = config()
-    if query.get("error"):
-        raise ValueError(f"Google authorization failed: {query.get('error', ['unknown'])[0]}")
-    state = query.get("state", [""])[0]
-    code = query.get("code", [""])[0]
-    if not state or not secrets.compare_digest(state, str(settings.get("googleOAuthState", ""))):
-        save_config({"googleOAuthState": "", "googleCodeVerifier": ""})
-        raise ValueError("Google authorization state did not match. That usually means this was an old Google tab or Lifey was restarted mid-login. Start the connection again from Lifey.")
-    if not code:
-        raise ValueError("Google did not return an authorization code.")
-    payload = {
-        "client_id": google_client_id(settings),
-        "code": code,
-        "code_verifier": str(settings.get("googleCodeVerifier", "")),
-        "redirect_uri": str(settings.get("googleRedirectUri") or GOOGLE_REDIRECT_URI),
-        "grant_type": "authorization_code",
-    }
-    if google_client_secret(settings):
-        payload["client_secret"] = google_client_secret(settings)
-    token = google_oauth_request(payload)
-    refresh_token = token.get("refresh_token") or settings.get("googleRefreshToken")
-    if not refresh_token:
-        raise ValueError("Google did not return a refresh token. Reconnect and approve offline access.")
-    access_token = token.get("access_token")
-    email = ""
-    if access_token:
-        try:
-            email = google_api_request("GET", "https://openidconnect.googleapis.com/v1/userinfo", access_token).get("email", "")
-        except ValueError:
-            email = ""
-    save_config({"googleRefreshToken": refresh_token, "googleAccountEmail": email, "googleOAuthState": "", "googleCodeVerifier": "", "googleRedirectUri": GOOGLE_REDIRECT_URI})
-    return email
-
-
-def google_calendar_today() -> dict:
-    settings = config()
-    token = google_access_token()
-    start = dt.datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0)
-    end = start + dt.timedelta(days=1)
-    query = urlencode({"singleEvents": "true", "orderBy": "startTime", "timeMin": start.isoformat(), "timeMax": end.isoformat()})
-    return google_api_request("GET", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id(settings))}/events?{query}", token)
-
-
-def google_calendar_create(body: dict) -> dict:
-    token = google_access_token()
-    return google_api_request("POST", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events", token, body)
-
-
-def google_calendar_update(event_id: str, body: dict) -> dict:
-    token = google_access_token()
-    return google_api_request("PATCH", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events/{quote_path(event_id)}", token, body)
-
-
-def google_calendar_delete(event_id: str) -> dict:
-    token = google_access_token()
-    return google_api_request("DELETE", f"https://www.googleapis.com/calendar/v3/calendars/{quote_path(google_calendar_id())}/events/{quote_path(event_id)}", token)
-
-
-def google_gmail_suggestions() -> dict:
-    token = google_access_token()
-    result = google_api_request("GET", f"https://gmail.googleapis.com/gmail/v1/users/me/messages?{urlencode({'q': google_gmail_query(), 'maxResults': '6'})}", token)
-    messages = []
-    for item in result.get("messages", [])[:6]:
-        message_id = item.get("id", "")
-        if not message_id:
-            continue
-        detail = google_api_request("GET", f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{quote_path(message_id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From", token)
-        headers = {header.get("name"): header.get("value", "") for header in detail.get("payload", {}).get("headers", [])}
-        messages.append({"id": message_id, "subject": headers.get("Subject", "(No subject)"), "from": headers.get("From", "Gmail"), "snippet": detail.get("snippet", "")})
-    return {"messages": messages}
-
-
-def mobile_location_samples() -> list[dict]:
-    """Read Lifey Location's durable, phone-originated sample store."""
-    try:
-        data = json.loads(MOBILE_LOCATIONS.read_text())
-        return data if isinstance(data, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
-
-
-def mobile_positions(start: dt.datetime, end: dt.datetime) -> list[dict]:
-    """Convert phone-originated samples into the same shape used by Traccar."""
-    positions = []
-    for sample in mobile_location_samples():
-        stamp = parse_stamp(sample.get("capturedAt"))
-        if not stamp or not start <= stamp.astimezone() < end:
-            continue
-        positions.append({
-            "latitude": sample.get("latitude"),
-            "longitude": sample.get("longitude"),
-            "fixTime": stamp.astimezone().isoformat(),
-            "deviceTime": stamp.astimezone().isoformat(),
-            "accuracy": sample.get("accuracyMeters"),
-            "source": "Lifey Location",
-        })
-    return positions
-
-
-def location_positions(start: dt.datetime, end: dt.datetime) -> tuple[list[dict], str]:
-    """Prefer Lifey Location samples, then fall back to a configured Traccar device."""
-    phone_positions = mobile_positions(start, end)
-    if phone_positions:
-        return phone_positions, "Lifey Location"
-    settings = config()
-    if settings.get("traccarServer") and settings.get("traccarToken") and settings.get("traccarDeviceId"):
-        return traccar_positions(start, end), "Traccar"
-    return [], "Lifey Location"
-
-
-def save_mobile_location_samples(samples: list[dict]) -> None:
-    MOBILE_LOCATIONS.parent.mkdir(parents=True, exist_ok=True)
-    MOBILE_LOCATIONS.write_text(json.dumps(samples, indent=2))
-
-
-def location_collector_token() -> str:
-    token = config().get("lifeyLocationToken", "")
-    if token:
-        return token
-    token = secrets.token_urlsafe(32)
-    save_config({"lifeyLocationToken": token})
-    return token
-
-
-def add_mobile_location_samples(samples: list[dict]) -> tuple[int, int]:
-    """Validate/deduplicate an idempotent batch sent by the iOS collector."""
-    existing = mobile_location_samples()
-    known = {str(item.get("id", "")) for item in existing}
-    added = 0
-    for sample in samples[:250]:
-        try:
-            sample_id = str(sample["id"]).strip()
-            latitude, longitude = float(sample["latitude"]), float(sample["longitude"])
-            captured_at = parse_stamp(sample.get("capturedAt"))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if not captured_at or not sample_id or sample_id in known or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
-            continue
-        existing.append({
-            "id": sample_id[:100], "latitude": latitude, "longitude": longitude,
-            "capturedAt": captured_at.astimezone().isoformat(),
-            "accuracyMeters": max(0, min(float(sample.get("accuracyMeters", 0)), 50_000)),
-            "source": "Lifey Location",
-        })
-        known.add(sample_id); added += 1
-    existing.sort(key=lambda item: item.get("capturedAt", ""))
-    # Keep all recent history and cap pathological growth without making retention a daily concern.
-    save_mobile_location_samples(existing[-200_000:])
-    return added, len(existing)
-
-
-def youtube_video_identity(raw_url: str, raw_video_id: str = "") -> tuple[str, str, str] | None:
-    parsed = urlparse(raw_url)
-    if parsed.scheme != "https" or not parsed.netloc.endswith("youtube.com"):
-        return None
-    video_id = raw_video_id.strip()
-    kind = "watch"
-    if not video_id and parsed.path == "/watch":
-        video_id = parse_qs(parsed.query).get("v", [""])[0].strip()
-    if not video_id and parsed.path.startswith("/shorts/"):
-        parts = [part for part in parsed.path.split("/") if part]
-        video_id = parts[1].strip() if len(parts) > 1 else ""
-        kind = "shorts"
-    if not video_id:
-        return None
-    canonical = f"https://www.youtube.com/shorts/{video_id}" if kind == "shorts" else f"https://www.youtube.com/watch?v={video_id}"
-    return video_id, canonical, kind
-
-
-def youtube_normalized_videos(videos: list[dict]) -> list[dict]:
-    merged: dict[str, dict] = {}
-    for video in videos or []:
-        identity = youtube_video_identity(str(video.get("url", "")), str(video.get("videoId", "")))
-        if not identity:
-            continue
-        video_id, canonical_url, kind = identity
-        item = merged.setdefault(video_id, {
-            "title": video.get("title") or "YouTube video",
-            "url": canonical_url,
-            "videoId": video_id,
-            "kind": kind,
-            "firstSeen": video.get("firstSeen", ""),
-            "lastSeen": video.get("lastSeen", ""),
-            "activeSeconds": 0,
-        })
-        if video.get("title"):
-            item["title"] = video["title"]
-        item["activeSeconds"] += int(video.get("activeSeconds", 0) or 0)
-        if video.get("firstSeen") and (not item.get("firstSeen") or video["firstSeen"] < item["firstSeen"]):
-            item["firstSeen"] = video["firstSeen"]
-        if video.get("lastSeen") and video["lastSeen"] > item.get("lastSeen", ""):
-            item["lastSeen"] = video["lastSeen"]
-    return list(merged.values())
-
-
-def youtube_today() -> dict:
-    log = activity_log()
-    today = dt.date.today().isoformat()
-    data = youtube_day_data(log, today)
-    videos = sorted(youtube_normalized_videos(data.get("videos", [])), key=lambda video: (int(video.get("activeSeconds", 0)), video.get("lastSeen", "")), reverse=True)
-    return {"date": today, "videos": videos, "totalActiveSeconds": sum(video.get("activeSeconds", 0) for video in videos), "extensionLastSeen": log.get("youtubeExtensionLastSeen")}
-
-
-def youtube_day_data(log: dict, date: str) -> dict:
-    days = log.get("youtubeDays", {})
-    if isinstance(days, dict) and isinstance(days.get(date), dict):
-        return days[date]
-    current = log.get("youtube", {})
-    if isinstance(current, dict) and current.get("date") == date:
-        return current
-    return {"date": date, "videos": []}
-
-
-def youtube_week() -> dict:
-    log = activity_log()
-    start, _ = period_bounds("week")
-    days = []
-    aggregate: dict[str, dict] = {}
-    for offset in range(7):
-        date = (start.date() + dt.timedelta(days=offset)).isoformat()
-        data = youtube_day_data(log, date)
-        videos = sorted(youtube_normalized_videos(data.get("videos", [])), key=lambda video: (int(video.get("activeSeconds", 0)), video.get("lastSeen", "")), reverse=True)
-        total = sum(video.get("activeSeconds", 0) for video in videos)
-        days.append({"date": date, "videos": videos, "totalActiveSeconds": total})
-        for video in videos:
-            key = video.get("videoId") or video.get("url") or video.get("title") or f"{date}:{len(aggregate)}"
-            item = aggregate.setdefault(key, {"title": video.get("title", "YouTube video"), "url": video.get("url", ""), "videoId": video.get("videoId", ""), "kind": video.get("kind", "watch"), "activeSeconds": 0, "firstSeen": video.get("firstSeen", ""), "lastSeen": video.get("lastSeen", "")})
-            item["title"] = video.get("title") or item["title"]
-            item["url"] = video.get("url") or item["url"]
-            item["videoId"] = video.get("videoId") or item.get("videoId", "")
-            item["kind"] = video.get("kind") or item.get("kind", "watch")
-            item["activeSeconds"] += int(video.get("activeSeconds", 0))
-            if video.get("firstSeen") and (not item.get("firstSeen") or video["firstSeen"] < item["firstSeen"]):
-                item["firstSeen"] = video["firstSeen"]
-            if video.get("lastSeen") and video["lastSeen"] > item.get("lastSeen", ""):
-                item["lastSeen"] = video["lastSeen"]
-    top_videos = sorted(aggregate.values(), key=lambda video: (video.get("activeSeconds", 0), video.get("lastSeen", "")), reverse=True)
-    return {"start": start.date().isoformat(), "days": days, "videos": top_videos, "totalActiveSeconds": sum(day["totalActiveSeconds"] for day in days), "extensionLastSeen": log.get("youtubeExtensionLastSeen")}
-
-
-def notion_request(method: str, path: str, token: str, payload: dict | None = None) -> dict:
-    body = json.dumps(payload).encode() if payload is not None else None
-    req = urlrequest.Request(f"https://api.notion.com/v1{path}", data=body, method=method, headers={"Authorization": f"Bearer {token}", "Notion-Version": "2026-03-11", "Content-Type": "application/json"})
-    try:
-        with urlrequest.urlopen(req, timeout=15, context=SSL_CONTEXT) as response:
-            return json.loads(response.read())
-    except urlerror.HTTPError as error:
-        detail = json.loads(error.read() or b"{}").get("message", error.reason)
-        raise ValueError(f"Notion: {detail}") from error
-
-
-def traccar_request(path: str, token: str, server: str) -> dict:
-    target = server.rstrip("/") + path
-    req = urlrequest.Request(target, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urlrequest.urlopen(req, timeout=20, context=SSL_CONTEXT) as response:
-            raw = response.read()
-            if response.headers.get("Content-Encoding", "").lower() == "gzip" or raw.startswith(b"\x1f\x8b"):
-                raw = gzip.decompress(raw)
-            for candidate in (raw,):
-                for encoding in ("utf-8", "latin-1"):
-                    try:
-                        return json.loads(candidate.decode(encoding))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-            try:
-                decompressed = zlib.decompress(raw)
-                for encoding in ("utf-8", "latin-1"):
-                    try:
-                        return json.loads(decompressed.decode(encoding))
-                    except (UnicodeDecodeError, json.JSONDecodeError):
-                        continue
-            except zlib.error:
-                pass
-            raise ValueError("Traccar returned a response Lifey could not decode. Refresh Traccar and try again.")
-    except urlerror.HTTPError as error:
-        raise ValueError(f"Traccar endpoint {target} returned {error.code} {error.reason}") from error
-
-
-def google_place(latitude: float, longitude: float) -> dict | None:
-    settings = config(); key = settings.get("googlePlacesKey", "")
-    if not key: return None
-    cache_key = f"{latitude:.3f},{longitude:.3f}"; cache = settings.get("placeCache", {})
-    if cache_key in cache: return cache[cache_key]
-    payload = json.dumps({"maxResultCount": 1, "locationRestriction": {"circle": {"center": {"latitude": latitude, "longitude": longitude}, "radius": 100.0}}}).encode()
-    req = urlrequest.Request("https://places.googleapis.com/v1/places:searchNearby", data=payload, method="POST", headers={"Content-Type": "application/json", "X-Goog-Api-Key": key, "X-Goog-FieldMask": "places.displayName,places.formattedAddress"})
-    try:
-        with urlrequest.urlopen(req, timeout=12, context=SSL_CONTEXT) as response: data = json.loads(response.read())
-        place = (data.get("places") or [{}])[0]; result = {"name": place.get("displayName", {}).get("text"), "address": place.get("formattedAddress")}
-        if result["name"]: cache[cache_key] = result; save_config({"placeCache": cache, "osmLastError": ""}); return result
-    except (urlerror.URLError, urlerror.HTTPError): return None
-
-
-def osm_place(latitude: float, longitude: float) -> dict | None:
-    global LAST_NOMINATIM_REQUEST
-    settings = config(); cache_key = f"osm:{latitude:.3f},{longitude:.3f}"; cache = settings.get("placeCache", {})
-    if cache_key in cache: return cache[cache_key]
-    time.sleep(max(0, 1 - (time.monotonic() - LAST_NOMINATIM_REQUEST))); LAST_NOMINATIM_REQUEST = time.monotonic()
-    url = "https://nominatim.openstreetmap.org/reverse?" + urlencode({"lat": latitude, "lon": longitude, "format": "jsonv2", "zoom": 18, "namedetails": 1})
-    try:
-        req = urlrequest.Request(url, headers={"User-Agent": "TodayCommandCenter/0.1 (personal local dashboard)"})
-        with urlrequest.urlopen(req, timeout=12, context=SSL_CONTEXT) as response: data = json.loads(response.read())
-        display = data.get("display_name", ""); result = {"name": data.get("namedetails", {}).get("name") or display.split(",")[0], "address": display}
-        if result["name"]: cache[cache_key] = result; save_config({"placeCache": cache}); return result
-    except (urlerror.URLError, urlerror.HTTPError) as error:
-        save_config({"osmLastError": str(error)}); return None
-
-
-def distance_meters(latitude_a: float, longitude_a: float, latitude_b: float, longitude_b: float) -> float:
-    """Return the great-circle distance without sending coordinates anywhere."""
-    from math import asin, cos, radians, sin, sqrt
-    lat_delta = radians(latitude_b - latitude_a)
-    lon_delta = radians(longitude_b - longitude_a)
-    a = sin(lat_delta / 2) ** 2 + cos(radians(latitude_a)) * cos(radians(latitude_b)) * sin(lon_delta / 2) ** 2
-    return 6_371_000 * 2 * asin(sqrt(a))
-
-
-def local_place_label(latitude: float, longitude: float) -> dict | None:
-    matches = []
-    for label in config().get("localPlaceLabels", []):
-        try:
-            distance = distance_meters(latitude, longitude, float(label["latitude"]), float(label["longitude"]))
-            if distance <= float(label.get("radiusMeters", 50)):
-                matches.append((distance, label))
-        except (KeyError, TypeError, ValueError):
-            continue
-    if not matches:
-        return None
-    distance, label = min(matches, key=lambda item: item[0])
-    return {"name": label["name"], "distance": round(distance)}
-
-
-def grouping_radius() -> int:
-    try:
-        return max(20, min(500, int(config().get("placeGroupingRadiusMeters", 50))))
-    except (TypeError, ValueError):
-        return 50
-
-
-def manual_merge_for(latitude: float, longitude: float) -> dict | None:
-    for merge in config().get("placeMerges", []):
-        for anchor in merge.get("anchors", []):
-            try:
-                if distance_meters(latitude, longitude, float(anchor["latitude"]), float(anchor["longitude"])) <= float(merge.get("anchorRadiusMeters", 50)):
-                    return merge
-            except (KeyError, TypeError, ValueError):
-                continue
-    return None
-
-
-def is_coordinate_label(value: str) -> bool:
-    return bool(re.fullmatch(r"-?\d+\.\d+,\s*-?\d+\.\d+", str(value).strip()))
-
-
-def consolidate_place_visits(visits: list[dict]) -> list[dict]:
-    """Combine separate visits to the same slider-defined place and sum dwell time."""
-    groups: list[dict] = []
-    for visit in visits:
-        latitude, longitude = float(visit["latitude"]), float(visit["longitude"])
-        merge_id = visit.get("mergeId")
-        local = local_place_label(latitude, longitude)
-        group = None
-        if merge_id:
-            group = next((item for item in groups if item.get("mergeId") == merge_id), None)
-        elif local:
-            group = next((item for item in groups if item.get("localLabel") == local["name"]), None)
-        if not group:
-            group = next((item for item in groups if not merge_id and not item.get("mergeId") and not item.get("localLabel") and distance_meters(item["_lastLatitude"], item["_lastLongitude"], latitude, longitude) <= grouping_radius()), None)
-        if not group:
-            group = {**visit, "_lastLatitude": latitude, "_lastLongitude": longitude, "_names": [visit["name"]], "_ranges": [visit], "totalSeconds": 0, "visits": 0}
-            if merge_id:
-                group["mergeId"] = merge_id
-            if local:
-                group["localLabel"] = local["name"]
-            groups.append(group)
-        else:
-            group["departure"] = visit["departure"]
-            group["_lastLatitude"], group["_lastLongitude"] = latitude, longitude
-            group["_names"].append(visit["name"])
-            group["_ranges"].append(visit)
-            group.setdefault("points", []).extend(visit.get("points", []))
-        group["totalSeconds"] += place_duration_seconds(visit)
-        group["visits"] += 1
-    for group in groups:
-        meaningful_names = list(dict.fromkeys(name for name in group.pop("_names") if not is_coordinate_label(name)))
-        if meaningful_names:
-            group["name"] = " – ".join(meaningful_names[:2])
-        group.pop("_ranges", None)
-        group.pop("_lastLatitude", None)
-        group.pop("_lastLongitude", None)
-        group.pop("localLabel", None)
-    return groups
-
-
-def traccar_places(positions: list[dict], source_label: str = "Traccar") -> list[dict]:
-    positions.sort(key=lambda item: item.get("fixTime", "")); places = []
-    radius = grouping_radius()
-    for point in positions:
-        latitude, longitude = point.get("latitude", 0), point.get("longitude", 0); label = point.get("address") or f"{latitude:.4f}, {longitude:.4f}"
-        stamp = point.get("fixTime") or point.get("deviceTime")
-        # Compare to the latest point in a stay, not its first point. iPhone GPS
-        # can drift enough over several 10-minute samples to exceed the radius
-        # from the original point even while the phone never left the place.
-        near_previous = places and distance_meters(places[-1]["_lastLatitude"], places[-1]["_lastLongitude"], latitude, longitude) <= radius
-        if not near_previous:
-            places.append({"name": label, "label": label, "latitude": latitude, "longitude": longitude, "_lastLatitude": latitude, "_lastLongitude": longitude, "arrival": stamp, "departure": stamp, "source": source_label, "points": [{"latitude": latitude, "longitude": longitude, "timestamp": stamp}]})
-        else:
-            places[-1]["departure"] = stamp
-            places[-1]["_lastLatitude"], places[-1]["_lastLongitude"] = latitude, longitude
-            places[-1]["points"].append({"latitude": latitude, "longitude": longitude, "timestamp": stamp})
-    osm_budget = 1
-    for place in places:
-        merge = manual_merge_for(place["latitude"], place["longitude"])
-        if merge:
-            place["name"] = merge["name"]
-            place["source"] = f"Merged · {source_label}"
-            place["merged"] = True
-            place["mergeId"] = merge["id"]
-            continue
-        local_label = local_place_label(place["latitude"], place["longitude"])
-        if local_label:
-            place["name"] = local_label["name"]
-            place["source"] = f"Local label · {source_label}"
-            place["labelDistance"] = local_label["distance"]
-            continue
-        osm_cache_key = f"osm:{place['latitude']:.3f},{place['longitude']:.3f}"
-        settings = config()
-        was_cached = osm_cache_key in settings.get("placeCache", {})
-        use_osm = settings.get("osmPlacesEnabled") and (was_cached or osm_budget > 0)
-        if settings.get("googlePlacesKey"):
-            enriched, source = google_place(place["latitude"], place["longitude"]), f"Google Places · {source_label}"
-        elif use_osm:
-            enriched, source = osm_place(place["latitude"], place["longitude"]), f"OpenStreetMap · {source_label}"
-        else:
-            enriched, source = None, source_label
-        if use_osm and not settings.get("googlePlacesKey") and not was_cached: osm_budget -= 1
-        if enriched: place["name"] = enriched["name"]; place["address"] = enriched.get("address"); place["source"] = source
-    return consolidate_place_visits(places)
-
-
-def parse_stamp(value: str | None) -> dt.datetime | None:
-    if not value:
-        return None
-    if isinstance(value, (int, float)):
-        # Swift Date's default Codable form is seconds since 2001-01-01.
-        # Accept Unix seconds too so older queued batches are not lost.
-        base = 978_307_200 if value < 1_200_000_000 else 0
-        try:
-            return dt.datetime.fromtimestamp(value + base, tz=dt.timezone.utc)
-        except (OSError, OverflowError, ValueError):
-            return None
-    try:
-        return dt.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-
-
-def traccar_positions(start: dt.datetime, end: dt.datetime) -> list[dict]:
-    settings = config()
-    query = "/api/reports/route?" + urlencode({
-        "deviceId": settings["traccarDeviceId"],
-        "from": start.astimezone(dt.timezone.utc).isoformat(),
-        "to": end.astimezone(dt.timezone.utc).isoformat(),
-    })
-    return traccar_request(query, settings["traccarToken"], settings["traccarServer"])
-
-
-def period_bounds(period: str) -> tuple[dt.datetime, dt.datetime]:
-    now = dt.datetime.now().astimezone()
-    start_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    if period == "today":
-        return start_day, start_day + dt.timedelta(days=1)
-    if period == "week":
-        return start_day - dt.timedelta(days=start_day.weekday()), start_day + dt.timedelta(days=1)
-    if period == "weekly":
-        start = start_day - dt.timedelta(days=start_day.weekday())
-        return start, start + dt.timedelta(days=7)
-    if period == "monthly":
-        start = start_day.replace(day=1)
-        next_month = (start.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
-        return start, next_month
-    if period == "yearly":
-        start = start_day.replace(month=1, day=1)
-        return start, start.replace(year=start.year + 1)
-    raise ValueError("Choose today, week, weekly, monthly, or yearly.")
-
-
-def place_duration_seconds(place: dict) -> int:
-    if "totalSeconds" in place:
-        return max(0, int(place["totalSeconds"]))
-    start, end = parse_stamp(place.get("arrival")), parse_stamp(place.get("departure"))
-    if not start or not end:
-        return 0
-    return max(0, round((end - start).total_seconds()))
-
-
-def human_duration(seconds: int) -> str:
-    minutes = max(0, round(seconds / 60))
-    if minutes < 1:
-        return "<1 min"
-    if minutes < 60:
-        return f"{minutes} min"
-    hours, remainder = divmod(minutes, 60)
-    return f"{hours}h" + (f" {remainder}m" if remainder else "")
-
-
-def place_key(place: dict) -> str:
-    if place.get("mergeId"):
-        return "merge:" + str(place["mergeId"])
-    local = local_place_label(float(place.get("latitude", 0)), float(place.get("longitude", 0)))
-    if local:
-        return "label:" + local["name"].strip().lower()
-    return f"coordinate:{float(place.get('latitude', 0)):.3f},{float(place.get('longitude', 0)):.3f}"
-
-
-def top_places(places: list[dict], limit: int = 10) -> list[dict]:
-    totals: list[dict] = []
-    for place in places:
-        latitude, longitude = float(place.get("latitude", 0)), float(place.get("longitude", 0))
-        key = place_key(place)
-        item = next((candidate for candidate in totals if candidate["key"] == key), None)
-        if not item and key.startswith("coordinate:"):
-            item = next((candidate for candidate in totals if candidate["key"].startswith("coordinate:") and distance_meters(candidate["latitude"], candidate["longitude"], latitude, longitude) <= grouping_radius()), None)
-        if not item:
-            item = {"key": key, "name": place.get("name") or "Unknown place", "seconds": 0, "visits": 0, "source": place.get("source", "Traccar"), "latitude": latitude, "longitude": longitude}
-            totals.append(item)
-        item["seconds"] += place_duration_seconds(place)
-        item["visits"] += 1
-    return [{key: value for key, value in item.items() if key not in {"key", "latitude", "longitude"}} for item in sorted(totals, key=lambda item: (item["seconds"], item["visits"]), reverse=True)[:limit]]
-
-
-def week_location_data(source_mode: str = "auto") -> dict:
-    start, end = period_bounds("week")
-    if source_mode == "traccar":
-        positions, source = traccar_positions(start, end), "Traccar"
-    else:
-        positions, source = location_positions(start, end)
-    by_day: dict[str, list[dict]] = {}
-    for point in positions:
-        stamp = parse_stamp(point.get("fixTime") or point.get("deviceTime"))
-        if stamp:
-            by_day.setdefault(stamp.astimezone().date().isoformat(), []).append(point)
-    days = []
-    all_places: list[dict] = []
-    for offset in range(7):
-        day = (start.date() + dt.timedelta(days=offset)).isoformat()
-        places = traccar_places(by_day.get(day, []), source)
-        all_places.extend(places)
-        days.append({"date": day, "places": places})
-    return {"start": start.date().isoformat(), "end": end.date().isoformat(), "days": days, "topPlaces": top_places(all_places), "positions": len(positions), "source": source}
-
-
-def notion_data_source(settings: dict) -> str:
-    token, parent = settings.get("notionToken", ""), settings.get("notionParentId", "")
-    if not token or not parent:
-        raise ValueError("Configure a Notion token and database/data source ID first.")
-    try:
-        notion_request("GET", f"/data_sources/{parent}", token)
-        return parent
-    except ValueError:
-        database = notion_request("GET", f"/databases/{parent}", token)
-        sources = database.get("data_sources", [])
-        if not sources:
-            raise ValueError("That Notion database has no data source.")
-        return sources[0]["id"]
-
-
-def notion_title(item: dict) -> str:
-    title = item.get("title") or item.get("name") or []
-    if isinstance(title, str):
-        return title
-    return "".join(part.get("plain_text") or part.get("text", {}).get("content", "") for part in title) or "Untitled"
-
-
-def daily_names_for(day: dt.date) -> list[str]:
-    return [
-        f"{day.strftime('%B')} {day.day:02d}, {day.year}.md",
-        f"{day.strftime('%B')} {day.day}, {day.year}.md",
-        f"{day.isoformat()}.md",
-    ]
-
-
-def daily_names() -> list[str]:
-    return daily_names_for(dt.date.today())
-
-
-def daily_candidate_folders() -> list[Path]:
-    raw = config().get("dailyNotesPath", "")
-    folder = Path(raw).expanduser()
-    if not folder.is_dir():
-        raise FileNotFoundError("Configure an existing Journals or Daily notes folder first.")
-    folders = [folder]
-    folders.append(folder.parent if folder.name.lower() == "daily" else folder / "Daily")
-    unique: list[Path] = []
-    for item in folders:
-        if item not in unique:
-            unique.append(item)
-    return unique
-
-
-def daily_file() -> Path:
-    today = dt.date.today()
-    for candidate_folder in daily_candidate_folders():
-        for name in daily_names_for(today):
-            candidate = candidate_folder / name
-            if candidate.is_file():
-                return candidate
-    raise FileNotFoundError(f"No note found for today ({daily_names()[0]}).")
-
-
-def daily_file_for_date(day: dt.date) -> Path | None:
-    for candidate_folder in daily_candidate_folders():
-        for name in daily_names_for(day):
-            candidate = candidate_folder / name
-            if candidate.is_file():
-                return candidate
-    return None
-
-
-def task_due_date(text: str) -> dt.date | None:
-    match = re.search(r"📅\s*(\d{4}-\d{2}-\d{2})", text)
-    if not match:
-        return None
-    try:
-        return dt.date.fromisoformat(match.group(1))
-    except ValueError:
-        return None
-
-
-def task_section_bounds(lines: list[str]) -> tuple[int | None, int | None]:
-    start = next((index for index, line in enumerate(lines) if re.match(r"^#{1,6}\s*Tasks::\s*$", line.strip(), re.IGNORECASE)), None)
-    if start is None:
-        return None, None
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if re.match(r"^#{1,6}\s+", lines[index]):
-            end = index
-            break
-    return start, end
-
-
-def archive_start_line(lines: list[str]) -> int | None:
-    for index in range(len(lines) - 1):
-        if lines[index].strip() == START and re.match(r"^##\s+Lifey\b", lines[index + 1].strip()):
-            return index
-    return None
-
-
-def insert_task_under_tasks(note: Path, text: str) -> dict:
-    previous = note.read_text()
-    lines = previous.splitlines()
-    task_line = f"- [ ] {text}"
-    start, end = task_section_bounds(lines)
-    if start is not None and end is not None:
-        prefix = lines[:end]
-        suffix = lines[end:]
-        while len(prefix) > start + 1 and not prefix[-1].strip():
-            prefix.pop()
-        insert = []
-        if len(prefix) == start + 1:
-            insert.append("")
-        insert.append(task_line)
-        if suffix and suffix[0].strip():
-            insert.append("")
-        line_number = len(prefix) + insert.index(task_line) + 1
-        updated_lines = prefix + insert + suffix
-    else:
-        habit_start, _ = habit_section_bounds(lines)
-        archive_start = archive_start_line(lines)
-        candidates = [index for index in (archive_start, habit_start) if index is not None]
-        insert_at = min(candidates) if candidates else len(lines)
-        prefix = lines[:insert_at]
-        suffix = lines[insert_at:]
-        while prefix and not prefix[-1].strip():
-            prefix.pop()
-        insert = []
-        if prefix:
-            insert.append("")
-        insert.extend(["## Tasks::", "", task_line])
-        if suffix and suffix[0].strip():
-            insert.append("")
-        line_number = len(prefix) + insert.index(task_line) + 1
-        updated_lines = prefix + insert + suffix
-    note.write_text("\n".join(updated_lines).rstrip() + "\n")
-    return {"line": line_number, "text": text, "path": str(note), "noteDate": (note_date_from_path(note) or dt.date.fromtimestamp(note.stat().st_mtime)).isoformat()}
-
-
-def target_note_for_new_task(text: str, prefer_due_date_note: bool = False) -> Path:
-    if prefer_due_date_note:
-        due = task_due_date(text)
-        if due:
-            due_note = daily_file_for_date(due)
-            if due_note:
-                return due_note
-    return daily_file()
-
-
-def journals_folder() -> Path:
-    folder = Path(config().get("dailyNotesPath", "")).expanduser()
-    if not folder.is_dir():
-        raise FileNotFoundError("Configure your Journals folder first.")
-    return folder.parent if folder.name.lower() == "daily" else folder
-
-
-def vault_folder() -> Path:
-    journals = journals_folder()
-    return journals.parent if journals.name.lower() in {"journals", "journal"} else journals.parent
-
-
-def note_safe_name(name: str) -> str:
-    return re.sub(r"[/:\\]", "-", name).strip()[:160]
-
-
-def wiki_place(name: str) -> str:
-    clean = str(name).replace('"', "'").replace("]]", "").strip() or "Unknown place"
-    return f'[[Place - "{clean}"]]'
-
-
-def project_slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
-
-
-def project_title_from_slug(slug: str) -> str:
-    return " ".join(part.capitalize() for part in slug.split("-") if part) or slug
-
-
-def decimal_field(body: str, field: str) -> float:
-    match = re.search(rf"\[{re.escape(field)}::\s*([0-9]+(?:\.[0-9]+)?)\]", body, re.IGNORECASE)
-    return float(match.group(1)) if match else 0.0
-
-
-def strip_project_task_text(body: str) -> str:
-    clean = re.sub(r"#project/[A-Za-z0-9/_-]+", "", body)
-    clean = re.sub(r"#milestone\b", "", clean)
-    clean = re.sub(r"\[(?:estimate|time)::\s*[0-9]+(?:\.[0-9]+)?\]", "", clean, flags=re.IGNORECASE)
-    return re.sub(r"\s+", " ", clean).strip()
-
-
-def project_notes() -> dict[str, dict]:
-    projects_dir = vault_folder() / "Projects"
-    notes: dict[str, dict] = {}
-    if not projects_dir.is_dir():
-        return notes
-    for note in sorted(projects_dir.glob("*.md")):
-        slug = project_slug(note.stem)
-        notes[slug] = {"slug": slug, "title": note.stem, "path": str(note)}
-    return notes
-
-
-def project_task_notes() -> list[Path]:
-    folders: list[Path] = []
-    for folder in daily_candidate_folders():
-        if folder.is_dir() and folder not in folders:
-            folders.append(folder)
-    notes: list[Path] = []
-    for folder in folders:
-        notes.extend(sorted(folder.glob("*.md")))
-    return sorted(set(notes))
-
-
-def parse_project_tasks_from_note(note: Path) -> list[dict]:
-    try:
-        markdown = note.read_text()
-    except OSError:
-        return []
-    lines = markdown.splitlines()
-    start, end = habit_section_bounds(lines)
-    tasks = []
-    for index, line in enumerate(lines):
-        if start is not None and end is not None and start < index < end:
-            continue
-        match = re.match(r"^\s*-\s+\[([ xX])\]\s+(.+?)\s*$", line)
-        if not match:
-            continue
-        body = match.group(2).strip()
-        project_tags = re.findall(r"#project/([A-Za-z0-9/_-]+)", body)
-        if not project_tags:
-            continue
-        for raw_slug in project_tags:
-            slug = project_slug(raw_slug)
-            if not slug:
-                continue
-            tasks.append({
-                "projectSlug": slug,
-                "projectTag": f"#project/{raw_slug}",
-                "text": strip_project_task_text(body),
-                "raw": body,
-                "done": match.group(1).lower() == "x",
-                "milestone": bool(re.search(r"#milestone\b", body)),
-                "estimate": decimal_field(body, "estimate"),
-                "time": decimal_field(body, "time"),
-                "source": str(note),
-                "line": index + 1,
-                "date": (note_date_from_path(note) or dt.date.fromtimestamp(note.stat().st_mtime)).isoformat(),
-            })
-    return tasks
-
-
-def projects_summary() -> dict:
-    notes = project_notes()
-    tasks = [task for note in project_task_notes() for task in parse_project_tasks_from_note(note)]
-    grouped: dict[str, dict] = {}
-    for slug, note in notes.items():
-        grouped[slug] = {**note, "tasks": []}
-    for task in tasks:
-        slug = task["projectSlug"]
-        grouped.setdefault(slug, {"slug": slug, "title": project_title_from_slug(slug), "path": "", "tasks": []})
-        grouped[slug]["tasks"].append(task)
-    projects = []
-    for project in grouped.values():
-        project_tasks = sorted(project["tasks"], key=lambda item: (not item["milestone"], item["done"], item["date"], item["line"]))
-        completed = sum(1 for task in project_tasks if task["done"])
-        milestones = [task for task in project_tasks if task["milestone"]]
-        projects.append({
-            **{key: project.get(key, "") for key in ("slug", "title", "path")},
-            "taskCount": len(project_tasks),
-            "completedCount": completed,
-            "openCount": len(project_tasks) - completed,
-            "milestoneCount": len(milestones),
-            "milestoneCompleted": sum(1 for task in milestones if task["done"]),
-            "estimateTotal": round(sum(task["estimate"] for task in project_tasks), 2),
-            "timeTotal": round(sum(task["time"] for task in project_tasks), 2),
-            "tasks": project_tasks,
-        })
-    projects.sort(key=lambda item: (item["openCount"] == 0, -item["milestoneCount"], -item["openCount"], item["title"].lower()))
-    return {"projects": projects, "taskCount": len(tasks), "projectsPath": str(vault_folder() / "Projects"), "templatePath": str(vault_folder() / "Templates" / "Project.md")}
-
-
-def project_note_path(slug: str, title: str = "") -> Path:
-    notes = project_notes()
-    if slug in notes and notes[slug].get("path"):
-        return Path(notes[slug]["path"])
-    return vault_folder() / "Projects" / f"{note_safe_name(title or project_title_from_slug(slug))}.md"
-
-
-def create_project_note(slug: str, title: str = "") -> dict:
-    clean_slug = project_slug(slug or title)
-    if not clean_slug:
-        raise ValueError("Choose a project name first.")
-    project_title = title.strip() or project_title_from_slug(clean_slug)
-    destination = project_note_path(clean_slug, project_title)
-    destination.parent.mkdir(parents=True, exist_ok=True)
-    if not destination.exists():
-        templates_dir = vault_folder() / "Templates"
-        template = templates_dir / "Project.md"
-        if not template.is_file():
-            template = templates_dir / "Project"
-        content = template.read_text() if template.is_file() else "# {{title}}\n\n## Tasks\n\n```tasks\nnot done\ntag includes #project/{{slug}}\n```\n"
-        content = content.replace("{{title}}", project_title).replace("{{project}}", project_title).replace("{{slug}}", clean_slug)
-        destination.write_text(content.rstrip() + "\n")
-    return {"slug": clean_slug, "title": project_title, "path": str(destination)}
-
-
-def open_project_note(slug: str) -> dict:
-    note = project_note_path(project_slug(slug))
-    if not note.is_file():
-        raise FileNotFoundError("Create the project note first.")
-    subprocess.run(["open", str(note)], check=False)
-    return {"opened": True, "path": str(note)}
-
-
-def safe_project_task_source(source: str) -> Path:
-    source_path = Path(source).expanduser().resolve()
-    allowed = [folder.resolve() for folder in daily_candidate_folders()]
-    if not any(source_path.is_relative_to(folder) for folder in allowed):
-        raise ValueError("Project task source must be inside your Daily Notes folders.")
-    if not source_path.is_file():
-        raise FileNotFoundError("Project task source note no longer exists.")
-    return source_path
-
-
-def update_project_task(body: dict) -> dict:
-    note = safe_project_task_source(str(body.get("source", "")))
-    line_number = int(body.get("line", 0))
-    expected_text = str(body.get("previousText", "")).strip()
-    lines = note.read_text().splitlines(keepends=True)
-    if not 1 <= line_number <= len(lines):
-        raise ValueError("Project task line no longer exists.")
-    if line_in_habit_section(lines, line_number):
-        raise ValueError("That line is inside Habits::. Use the Habits card instead.")
-    match = re.match(r"^(\s*-\s+\[)[ xX](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
-    if not match or match.group(3).strip() != expected_text:
-        raise ValueError("Project task changed in Obsidian. Refresh projects first.")
-    if "completed" in body:
-        marker = "x" if body.get("completed") else " "
-        replacement_text = match.group(3)
-    else:
-        marker = "x" if match.group(0).lower().find("[x]") >= 0 else " "
-        replacement_text = " ".join(str(body.get("text", "")).splitlines()).strip()
-        if not replacement_text:
-            raise ValueError("Write a task first.")
-        if "#project/" not in replacement_text:
-            raise ValueError("Project tasks must keep a #project/... tag.")
-    lines[line_number - 1] = match.group(1) + marker + match.group(2) + replacement_text + match.group(4)
-    note.write_text("".join(lines))
-    return {"line": line_number, "path": str(note), "text": replacement_text, "completed": marker == "x"}
-
-
-WEEKDAY_CODES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-
-
-def habits_config_path() -> Path:
-    root = journals_folder()
-    preferred = root / "Habits" / "Active Habits.md"
-    fallback = root / "Active Habits.md"
-    return preferred if preferred.exists() or not fallback.exists() else fallback
-
-
-def split_markdown_table_row(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
-def normalise_habit_time(value: str) -> tuple[str, int | None]:
-    raw = (value or "").strip()
-    if not raw:
-        return "", None
-    cleaned = raw.lower().replace(".", "")
-    match = re.match(r"^(\d{1,2})(?::([0-5]\d))?\s*(am|pm)?$", cleaned)
-    if not match:
-        return raw, None
-    hour = int(match.group(1))
-    minute = int(match.group(2) or 0)
-    period = match.group(3)
-    if period:
-        if hour == 12:
-            hour = 0
-        if period == "pm":
-            hour += 12
-    if hour > 23:
-        return raw, None
-    return f"{hour:02d}:{minute:02d}", hour * 60 + minute
-
-
-def habit_note_schedule(body: str) -> dict:
-    time_label = ""
-    time_minutes = None
-    time_match = re.search(r"⏰\s*(\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)?)", body, re.IGNORECASE)
-    if not time_match:
-        time_match = re.search(r"\b(?:at\s+)?(\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?))\b", body, re.IGNORECASE)
-    if not time_match:
-        time_match = re.search(r"\b(?:at\s+)?([01]?\d|2[0-3]):([0-5]\d)\b", body)
-    if time_match:
-        time_value = f"{time_match.group(1)}:{time_match.group(2)}" if len(time_match.groups()) > 1 and time_match.group(2) else time_match.group(1)
-        time_label, time_minutes = normalise_habit_time(time_value)
-    date_match = re.search(r"📅\s*(\d{4}-\d{2}-\d{2})", body)
-    return {
-        "dueDate": date_match.group(1) if date_match else "",
-        "time": time_label,
-        "timeMinutes": time_minutes,
-    }
-
-
-def habit_body_without_schedule(body: str) -> str:
-    cleaned = re.sub(r"\s*📅\s*\d{4}-\d{2}-\d{2}", "", body)
-    cleaned = re.sub(r"\s*⏰\s*\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)?", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*\b(?:at\s+)?\d{1,2}(?::[0-5]\d)?\s*(?:a\.?m\.?|p\.?m\.?)\b", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s*\b(?:at\s+)?(?:[01]?\d|2[0-3]):[0-5]\d\b", "", cleaned)
-    return re.sub(r"\s+", " ", cleaned).strip()
-
-
-def read_habit_config() -> list[dict]:
-    path = habits_config_path()
-    if not path.is_file():
-        return []
-    rows: list[str] = []
-    for line in path.read_text().splitlines():
-        if line.strip().startswith("|"):
-            rows.append(line)
-        elif rows:
-            break
-    if len(rows) < 2:
-        return []
-    headers = [header.strip().lower() for header in split_markdown_table_row(rows[0])]
-    habits = []
-    for order, line in enumerate(rows[2:]):
-        if re.match(r"^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$", line):
-            continue
-        cells = split_markdown_table_row(line)
-        if not cells or not any(cells):
-            continue
-        item = {headers[index]: cells[index] if index < len(cells) else "" for index in range(len(headers))}
-        name = item.get("habit", "").strip()
-        if not name:
-            continue
-        days_raw = item.get("days", "Daily").strip() or "Daily"
-        days = ["Daily"] if days_raw.lower() == "daily" else [day.strip() for day in days_raw.split(",") if day.strip()]
-        try:
-            start = dt.date.fromisoformat(item.get("start", "").strip())
-        except ValueError:
-            start = None
-        try:
-            duration = int(item.get("duration", "").strip()) if item.get("duration", "").strip() else None
-        except ValueError:
-            duration = None
-        time_label, time_minutes = normalise_habit_time(item.get("time", ""))
-        habits.append({
-            "habit": name,
-            "start": start.isoformat() if start else "",
-            "duration": duration,
-            "days": days,
-            "daysText": days_raw,
-            "time": time_label,
-            "timeMinutes": time_minutes,
-            "order": order,
-            "label": item.get("label", "Day").strip() or "Day",
-            "status": item.get("status", "").strip().lower() or "active",
-        })
-    return habits
-
-
-def note_date_from_path(path: Path) -> dt.date | None:
-    stem = path.stem
-    for pattern in ("%B %d, %Y", "%B %e, %Y", "%Y-%m-%d"):
-        try:
-            return dt.datetime.strptime(stem, pattern).date()
-        except ValueError:
-            continue
-    return None
-
-
-def habit_scheduled_for(habit: dict, day: dt.date) -> bool:
-    if habit.get("status") != "active":
-        return False
-    try:
-        start = dt.date.fromisoformat(habit.get("start", ""))
-        if day < start:
-            return False
-    except ValueError:
-        pass
-    days = habit.get("days") or ["Daily"]
-    return "Daily" in days or WEEKDAY_CODES[day.weekday()] in days
-
-
-def habit_progress_label(habit: dict, day: dt.date) -> str:
-    label = habit.get("label") or "Day"
-    try:
-        start = dt.date.fromisoformat(habit.get("start", ""))
-        number = (day - start).days + 1
-    except ValueError:
-        number = 1
-    suffix = f"/{habit['duration']}" if habit.get("duration") else ""
-    return f"{label} {max(1, number)}{suffix}"
-
-
-def expected_habits_for(day: dt.date) -> list[dict]:
-    expected = []
-    for habit in read_habit_config():
-        if not habit_scheduled_for(habit, day):
-            continue
-        label = habit_progress_label(habit, day)
-        metadata = f" ⏰ {habit['time']}" if habit.get("time") else ""
-        expected.append({**habit, "date": day.isoformat(), "progress": label, "text": f"{habit['habit']} — {label}{metadata}"})
-    return sorted(expected, key=habit_sort_key)
-
-
-def habit_sort_key(habit: dict) -> tuple[str, int, int, int, str]:
-    due_date = habit.get("dueDate") or habit.get("date") or ""
-    minutes = habit.get("timeMinutes")
-    return (due_date, 0 if isinstance(minutes, int) else 1, minutes if isinstance(minutes, int) else 24 * 60, int(habit.get("order", 9999)), habit.get("habit", "").lower())
-
-
-def attach_habit_config(habits: list[dict], config_habits: list[dict]) -> list[dict]:
-    by_name = {habit.get("habit", "").strip().lower(): habit for habit in config_habits}
-    enriched = []
-    for habit in habits:
-        config_habit = by_name.get(habit.get("habit", "").strip().lower(), {})
-        enriched.append({
-            **habit,
-            "dueDate": habit.get("dueDate") or config_habit.get("date", ""),
-            "time": habit.get("time") or config_habit.get("time", ""),
-            "timeMinutes": habit.get("timeMinutes") if isinstance(habit.get("timeMinutes"), int) else config_habit.get("timeMinutes"),
-            "order": config_habit.get("order", 9999),
-        })
-    return sorted(enriched, key=habit_sort_key)
-
-
-def habit_section_bounds(lines: list[str]) -> tuple[int | None, int | None]:
-    start = next((index for index, line in enumerate(lines) if re.match(r"^(?:#{1,6}\s*)?Habits::\s*$", line.strip(), re.IGNORECASE)), None)
-    if start is None:
-        return None, None
-    end = len(lines)
-    for index in range(start + 1, len(lines)):
-        if re.match(r"^#{1,6}\s+", lines[index]):
-            end = index
-            break
-    return start, end
-
-
-def line_in_habit_section(lines: list[str], line_number: int) -> bool:
-    start, end = habit_section_bounds([line.rstrip("\r\n") for line in lines])
-    return start is not None and end is not None and start < line_number - 1 < end
-
-
-def parse_habit_lines(markdown: str, source: str = "") -> list[dict]:
-    lines = markdown.splitlines()
-    start, end = habit_section_bounds(lines)
-    if start is None or end is None:
-        return []
-    habits = []
-    for index in range(start + 1, end):
-        match = re.match(r"^(\s*)-\s+\[([ xX-])\]\s+(.+?)\s*$", lines[index])
-        if not match:
-            continue
-        body = match.group(3).strip()
-        schedule = habit_note_schedule(body)
-        clean_body = habit_body_without_schedule(body)
-        name, progress = (clean_body.split(" — ", 1) + [""])[:2] if " — " in clean_body else (clean_body, "")
-        marker = match.group(2).lower()
-        state = "completed" if marker == "x" else "skipped" if marker == "-" else "pending"
-        habits.append({"habit": name.strip(), "progress": progress.strip(), "text": body, **schedule, "state": state, "line": index + 1, "source": source})
-    return habits
-
-
-def sync_today_habits() -> dict:
-    note = daily_file()
-    day = note_date_from_path(note) or dt.date.today()
-    previous = note.read_text()
-    lines = previous.splitlines()
-    start, end = habit_section_bounds(lines)
-    if start is None:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.extend(["## Habits::"])
-        start, end = len(lines) - 1, len(lines)
-    existing = parse_habit_lines("\n".join(lines), str(note))
-    existing_names = {item["habit"].strip().lower() for item in existing}
-    additions = [habit for habit in expected_habits_for(day) if habit["habit"].strip().lower() not in existing_names]
-    if additions:
-        insert_at = end if end is not None else len(lines)
-        new_lines = [f"- [ ] {habit['text']}" for habit in additions]
-        lines[insert_at:insert_at] = new_lines
-        note.write_text("\n".join(lines).rstrip() + "\n")
-    return habits_today()
-
-
-def habits_today() -> dict:
-    note = daily_file()
-    day = note_date_from_path(note) or dt.date.today()
-    markdown = note.read_text()
-    config_habits = read_habit_config()
-    parsed = attach_habit_config([{**habit, "date": day.isoformat()} for habit in parse_habit_lines(markdown, str(note))], config_habits)
-    expected = expected_habits_for(day)
-    archived = [habit for habit in config_habits if habit.get("status") != "active"]
-    return {"date": day.isoformat(), "path": str(note), "habits": parsed, "expected": expected, "archived": archived, "configPath": str(habits_config_path())}
-
-
-def update_today_habit(line_number: int, habit: str, state: str) -> dict:
-    note = daily_file()
-    lines = note.read_text().splitlines(keepends=True)
-    if not 1 <= line_number <= len(lines):
-        raise ValueError("Habit line no longer exists in today's note.")
-    if not line_in_habit_section(lines, line_number):
-        raise ValueError("That line is not inside the Habits:: section. Refresh habits first.")
-    match = re.match(r"^(\s*-\s+\[)[ xX-](\]\s+)(.*?)(\r?\n?)$", lines[line_number - 1])
-    if not match:
-        raise ValueError("Habit line changed in Obsidian. Refresh habits first.")
-    body = match.group(3).strip()
-    current_name = body.split(" — ", 1)[0].strip()
-    if current_name != habit:
-        raise ValueError("Habit changed in Obsidian. Refresh habits first.")
-    marker = {"completed": "x", "pending": " ", "skipped": "-"}.get(state)
-    if marker is None:
-        raise ValueError("Choose completed, pending, or skipped.")
-    lines[line_number - 1] = match.group(1) + marker + match.group(2) + match.group(3) + match.group(4)
-    note.write_text("".join(lines))
-    return habits_today()
-
-
-def habit_history(range_name: str = "month") -> dict:
-    today = dt.date.today()
-    month_start = today.replace(day=1)
-    entries = []
-    daily_totals: dict[str, dict] = {}
-    habit_names: set[str] = set()
-    for folder in daily_candidate_folders():
-        if not folder.is_dir():
-            continue
-        for note in sorted(folder.glob("*.md")):
-            day = note_date_from_path(note)
-            if not day or (range_name != "all" and day < month_start):
-                continue
-            try:
-                habits = parse_habit_lines(note.read_text(), str(note))
-            except OSError:
-                continue
-            if not habits:
-                continue
-            total = daily_totals.setdefault(day.isoformat(), {"date": day.isoformat(), "completed": 0, "scheduled": 0, "skipped": 0})
-            for habit in habits:
-                habit_names.add(habit["habit"])
-                entries.append({**habit, "date": day.isoformat()})
-                total["scheduled"] += 1
-                if habit["state"] == "completed":
-                    total["completed"] += 1
-                if habit["state"] == "skipped":
-                    total["skipped"] += 1
-    config_habits = read_habit_config()
-    config_by_name = {habit.get("habit", "").strip().lower(): habit for habit in config_habits}
-    entries = [{**entry, "time": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("time", ""), "timeMinutes": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("timeMinutes"), "order": config_by_name.get(entry.get("habit", "").strip().lower(), {}).get("order", 9999)} for entry in entries]
-    archived = [habit for habit in config_habits if habit.get("status") != "active"]
-    for habit in config_habits:
-        habit_names.add(habit["habit"])
-    return {"range": range_name, "entries": sorted(entries, key=lambda item: (item.get("date", ""), *habit_sort_key(item))), "dailyTotals": sorted(daily_totals.values(), key=lambda item: item["date"]), "habits": sorted(habit_names), "active": sorted([h for h in config_habits if h.get("status") == "active"], key=habit_sort_key), "archived": sorted(archived, key=habit_sort_key)}
 
 
 def archive_period_title(period: str) -> str:
@@ -1800,7 +303,7 @@ def undo_place_merge(merge_id: str) -> dict:
 def write_location_archive(period: str) -> dict:
     start, end = period_bounds(period)
     positions, source = location_positions(start, end)
-    places = traccar_places(positions, source)
+    places = location_places(positions, source)
     daily_places = ""
     if period == "weekly":
         by_day: dict[str, list[dict]] = {}
@@ -1811,7 +314,7 @@ def write_location_archive(period: str) -> dict:
         daily_sections = []
         for offset in range(7):
             date = start.date() + dt.timedelta(days=offset)
-            visits = traccar_places(by_day.get(date.isoformat(), []), source)
+            visits = location_places(by_day.get(date.isoformat(), []), source)
             rows = "\n".join(f"- {wiki_place(visit['name'])} — {human_duration(place_duration_seconds(visit))}" for visit in visits) or "- No places recorded"
             daily_sections.append(f"### {date.strftime('%A, %B')} {date.day}\n{rows}")
         daily_places = "\n\n".join(daily_sections)
@@ -1830,15 +333,101 @@ def write_location_archive(period: str) -> dict:
     return {"path": str(note), "backup": str(backup) if backup else None, "placeNotes": place_notes, "positions": len(positions), "source": source}
 
 
+def build_api_routes() -> RouteRegistry:
+    routes = RouteRegistry()
+    for path, group in [
+        ("/api/obsidian/status", "obsidian"),
+        ("/api/obsidian/daily", "obsidian"),
+        ("/api/profile/preferences", "profile"),
+        ("/api/profile/export", "profile"),
+        ("/api/google/status", "google"),
+        ("/api/google/auth/start", "google"),
+        ("/api/google/auth/callback", "google"),
+        ("/api/google/calendar/today", "google"),
+        ("/api/google/gmail/suggestions", "google"),
+        ("/api/notion/status", "notion"),
+        ("/api/traccar/status", "location"),
+        ("/api/location/mobile/status", "location"),
+        ("/api/google-places/status", "location"),
+        ("/api/osm-places/status", "location"),
+        ("/api/location-archive-templates", "archive"),
+        ("/api/archive-titles", "archive"),
+        ("/api/location/settings", "location"),
+        ("/api/place-labels", "location"),
+        ("/api/traccar/today", "location"),
+        ("/api/traccar/week", "location"),
+        ("/api/location/today", "location"),
+        ("/api/location/week", "location"),
+        ("/api/habits/today", "habits"),
+        ("/api/habits/history", "habits"),
+        ("/api/projects", "projects"),
+        ("/api/activity/youtube/today", "activity"),
+        ("/api/activity/youtube/week", "activity"),
+    ]:
+        routes.add("GET", path, group, "handle_get_api_route")
+    for path, group in [
+        ("/api/location/mobile/setup", "location"),
+        ("/api/location/mobile/ingest", "location"),
+        ("/api/obsidian/config", "obsidian"),
+        ("/api/obsidian/pick-folder", "obsidian"),
+        ("/api/profile/preferences", "profile"),
+        ("/api/profile/import", "profile"),
+        ("/api/projects/create", "projects"),
+        ("/api/projects/open", "projects"),
+        ("/api/projects/task", "projects"),
+        ("/api/google/config", "google"),
+        ("/api/google/disconnect", "google"),
+        ("/api/google/calendar/event", "google"),
+        ("/api/google/calendar/event/update", "google"),
+        ("/api/google/calendar/event/delete", "google"),
+        ("/api/obsidian/archive", "archive"),
+        ("/api/archive-template", "archive"),
+        ("/api/location-archive-templates", "archive"),
+        ("/api/archive-titles", "archive"),
+        ("/api/location/settings", "location"),
+        ("/api/place-merges", "location"),
+        ("/api/place-merges/undo", "location"),
+        ("/api/obsidian/location-archive", "archive"),
+        ("/api/habits/sync", "habits"),
+        ("/api/habits/state", "habits"),
+        ("/api/obsidian/task", "obsidian"),
+        ("/api/obsidian/task/edit", "obsidian"),
+        ("/api/obsidian/task/delete", "obsidian"),
+        ("/api/obsidian/task/add", "obsidian"),
+        ("/api/notion/config", "notion"),
+        ("/api/traccar/config", "location"),
+        ("/api/google-places/config", "location"),
+        ("/api/osm-places/config", "location"),
+        ("/api/place-labels", "location"),
+        ("/api/traccar/devices", "location"),
+        ("/api/activity/youtube", "activity"),
+        ("/api/activity/youtube/ping", "activity"),
+        ("/api/notion/diagnose", "notion"),
+        ("/api/notion/data-sources", "notion"),
+        ("/api/notion/task", "notion"),
+    ]:
+        routes.add("POST", path, group, "handle_post_api_route", auth_required=path != "/api/location/mobile/ingest", reads_json=True)
+    return routes
+
+
+API_ROUTES = build_api_routes()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def end_headers(self):
         self.send_header("Cache-Control", "no-store")
-        self.send_header("Access-Control-Allow-Origin", "*")
+        origin = self.headers.get("Origin", "")
+        if origin and self.origin_allowed(origin, urlparse(self.path).path):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
         super().end_headers()
 
     def do_OPTIONS(self):
+        path = urlparse(self.path).path
+        if path.startswith("/api/") and not self.request_allowed(path):
+            return self.json({"error": "Lifey only accepts browser API calls from its own origin."}, HTTPStatus.FORBIDDEN)
         self.send_response(HTTPStatus.NO_CONTENT)
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.end_headers()
 
@@ -1859,11 +448,50 @@ class Handler(SimpleHTTPRequestHandler):
         self.wfile.write(payload)
 
     def read_json(self) -> dict:
-        length = int(self.headers.get("Content-Length", 0))
-        return json.loads(self.rfile.read(length) or b"{}")
+        return read_json_body(self.headers, self.rfile)
+
+    def route_error(self, message: str, status=HTTPStatus.BAD_REQUEST):
+        return self.json({"error": message}, status)
+
+    def dispatch_api_route(self, route, parsed):
+        if route.auth_required and not self.request_allowed(route.path):
+            return self.route_error("Lifey only accepts browser API calls from its own origin.", HTTPStatus.FORBIDDEN)
+        try:
+            body = self.read_json() if route.reads_json else None
+            if route.reads_json:
+                validate_json_body(route.path, body)
+            result = getattr(self, route.handler)(parsed, body, route)
+            if isinstance(result, ApiResponse):
+                return self.json(result.payload, result.status)
+            if isinstance(result, dict):
+                return self.json(result)
+            return result
+        except json.JSONDecodeError:
+            return self.route_error("Invalid request.", HTTPStatus.BAD_REQUEST)
+        except ApiError as error:
+            return self.route_error(error.message, error.status)
+        except (OSError, FileNotFoundError, ValueError) as error:
+            return self.route_error(str(error), HTTPStatus.BAD_REQUEST)
+
+    def origin_allowed(self, origin: str, path: str = "") -> bool:
+        return route_origin_allowed(origin, self.headers.get("Host", ""), path)
+
+    def request_allowed(self, path: str = "") -> bool:
+        return route_request_allowed(self.headers, self.client_address, path)
 
     def do_GET(self):
         parsed = urlparse(self.path)
+        path = parsed.path
+        route = API_ROUTES.get("GET", path)
+        if route:
+            return self.dispatch_api_route(route, parsed)
+        if path.startswith("/api/"):
+            if not self.request_allowed(path):
+                return self.route_error("Lifey only accepts browser API calls from its own origin.", HTTPStatus.FORBIDDEN)
+            return self.route_error("Not found.", HTTPStatus.NOT_FOUND)
+        return super().do_GET()
+
+    def handle_get_api_route(self, parsed, body=None, route=None):
         path = parsed.path
         if path == "/api/obsidian/status":
             settings = config()
@@ -1921,7 +549,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/traccar/today":
             try:
                 start, end = period_bounds("today"); positions = traccar_positions(start, end)
-                return self.json({"places": traccar_places(positions, "Traccar"), "positions": len(positions), "source": "Traccar", "osmError": config().get("osmLastError", "")})
+                return self.json({"places": location_places(positions, "Traccar"), "positions": len(positions), "source": "Traccar", "osmError": config().get("osmLastError", "")})
             except (KeyError, ValueError) as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/traccar/week":
             try:
@@ -1931,7 +559,7 @@ class Handler(SimpleHTTPRequestHandler):
         if path == "/api/location/today":
             try:
                 start, end = period_bounds("today"); positions, source = location_positions(start, end)
-                return self.json({"places": traccar_places(positions, source), "positions": len(positions), "source": source, "osmError": config().get("osmLastError", "")})
+                return self.json({"places": location_places(positions, source), "positions": len(positions), "source": source, "osmError": config().get("osmLastError", "")})
             except ValueError as error: return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/location/week":
             try:
@@ -1955,39 +583,78 @@ class Handler(SimpleHTTPRequestHandler):
             except (OSError, FileNotFoundError, ValueError) as error:
                 return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         if path == "/api/activity/youtube/today":
-            return self.json(youtube_today())
+            return self.json(activity_youtube_today(ACTIVITY))
         if path == "/api/activity/youtube/week":
-            return self.json(youtube_week())
+            return self.json(activity_youtube_week(ACTIVITY))
         if path == "/api/obsidian/daily":
             try:
                 note = daily_file()
                 return self.json({"name": note.name, "path": str(note), "markdown": note.read_text()})
             except (OSError, FileNotFoundError) as error:
                 return self.json({"error": str(error)}, HTTPStatus.NOT_FOUND)
-        return super().do_GET()
+        return self.route_error("Not found.", HTTPStatus.NOT_FOUND)
 
     def do_POST(self):
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
+        route = API_ROUTES.get("POST", path)
+        if route:
+            return self.dispatch_api_route(route, parsed)
+        if path.startswith("/api/"):
+            if not self.request_allowed(path):
+                return self.route_error("Lifey only accepts browser API calls from its own origin.", HTTPStatus.FORBIDDEN)
+            return self.route_error("Not found.", HTTPStatus.NOT_FOUND)
+        return self.route_error("Not found.", HTTPStatus.NOT_FOUND)
+
+    def handle_post_api_route(self, parsed, body=None, route=None):
+        path = parsed.path
+        body = body or {}
         try:
-            body = self.read_json()
             if path == "/api/location/mobile/setup":
                 # This endpoint is intentionally local-only because it returns the collector secret.
                 if self.client_address[0] not in {"127.0.0.1", "::1"}:
-                    return self.json({"error": "Create the Lifey Location token from the Mac dashboard."}, HTTPStatus.FORBIDDEN)
-                return self.json({"token": location_collector_token()})
+                    return self.json({"error": "Create the Lifey Location token from the Mac app."}, HTTPStatus.FORBIDDEN)
+                rotate = body.get("rotate") is True
+                return self.json({"token": location_collector_token(rotate=rotate), "rotated": rotate, "tokenCreatedAt": config().get("lifeyLocationTokenCreatedAt", "")})
             if path == "/api/location/mobile/ingest":
                 supplied = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
                 if not secrets.compare_digest(supplied, str(config().get("lifeyLocationToken", ""))):
                     return self.json({"error": "Lifey Location is not authorised."}, HTTPStatus.UNAUTHORIZED)
+                retry_after = mobile_ingest_retry_after(self.client_address[0], supplied)
+                if retry_after:
+                    return self.json({"error": "Too many Lifey Location sync attempts.", "retryAfterSeconds": retry_after}, HTTPStatus.TOO_MANY_REQUESTS)
                 samples = body.get("samples", [])
                 if not isinstance(samples, list):
                     return self.json({"error": "Invalid location batch."}, HTTPStatus.BAD_REQUEST)
-                added, total = add_mobile_location_samples(samples)
-                return self.json({"accepted": added, "stored": total})
+                return self.json(add_mobile_location_samples(samples))
             if path == "/api/obsidian/config":
-                folder = Path(body.get("dailyNotesPath", "")).expanduser()
-                if not folder.is_dir():
-                    return self.json({"error": "That Daily notes folder does not exist."}, HTTPStatus.BAD_REQUEST)
+                try:
+                    folder = resolve_obsidian_root(str(body.get("dailyNotesPath", "")))
+                except FileNotFoundError as error:
+                    return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                save_config({"dailyNotesPath": str(folder)})
+                return self.json({"dailyNotesPath": str(folder)})
+            if path == "/api/obsidian/pick-folder":
+                if self.client_address[0] not in {"127.0.0.1", "::1"}:
+                    return self.json({"error": "Choose the Obsidian folder from Lifey on the Mac at http://127.0.0.1:4173."}, HTTPStatus.FORBIDDEN)
+                script = '\n'.join([
+                    'tell application "Finder" to activate',
+                    'delay 0.2',
+                    'POSIX path of (choose folder with prompt "Choose your Obsidian vault, Journals folder, or Daily folder for Lifey")',
+                ])
+                try:
+                    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120, check=False)
+                except subprocess.TimeoutExpired:
+                    return self.json({"error": "Folder picker timed out. Paste the folder path instead, or try again from Lifey on the Mac."}, HTTPStatus.BAD_REQUEST)
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    if "User canceled" in detail or str(result.returncode) == "1":
+                        detail = "Folder selection was cancelled."
+                    return self.json({"error": detail or "macOS could not open the folder picker. Paste the folder path instead."}, HTTPStatus.BAD_REQUEST)
+                try:
+                    folder = resolve_obsidian_root(result.stdout.strip())
+                except FileNotFoundError as error:
+                    return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 save_config({"dailyNotesPath": str(folder)})
                 return self.json({"dailyNotesPath": str(folder)})
             if path == "/api/profile/preferences":
@@ -2042,7 +709,7 @@ class Handler(SimpleHTTPRequestHandler):
                 note = daily_file()
                 generated = body.get("archive", "")
                 if not has_archive_markers(generated):
-                    return self.json({"error": "Invalid dashboard archive."}, HTTPStatus.BAD_REQUEST)
+                    return self.json({"error": "Invalid Lifey archive."}, HTTPStatus.BAD_REQUEST)
                 previous = note.read_text()
                 block = archive_block(previous)
                 updated = block.sub(generated, previous) if block else previous.rstrip() + "\n\n" + generated + "\n"
@@ -2213,10 +880,10 @@ class Handler(SimpleHTTPRequestHandler):
                 title = str(body.get("title", "")).strip() or "YouTube video"
                 identity = youtube_video_identity(url, str(body.get("videoId", "")))
                 if not identity:
-                    return self.json(youtube_today())
+                    return self.json(activity_youtube_today(ACTIVITY))
                 video_id, canonical_url, kind = identity
                 now = dt.datetime.now().astimezone().isoformat()
-                log = activity_log(); today = dt.date.today().isoformat(); days = log.setdefault("youtubeDays", {})
+                log = activity_log(ACTIVITY); today = dt.date.today().isoformat(); days = log.setdefault("youtubeDays", {})
                 if not isinstance(days, dict):
                     days = {}; log["youtubeDays"] = days
                 current = log.get("youtube", {})
@@ -2234,10 +901,10 @@ class Handler(SimpleHTTPRequestHandler):
                 video["kind"] = kind
                 video["lastSeen"] = body.get("lastSeen") or now
                 video["activeSeconds"] += min(max(int(body.get("activeSeconds", 0)), 0), 60)
-                days[today] = data; log["youtube"] = data; save_activity(log)
-                return self.json(youtube_today())
+                days[today] = data; log["youtube"] = data; save_activity(ACTIVITY, log)
+                return self.json(activity_youtube_today(ACTIVITY))
             if path == "/api/activity/youtube/ping":
-                log = activity_log(); log["youtubeExtensionLastSeen"] = dt.datetime.now().astimezone().isoformat(); save_activity(log)
+                log = activity_log(ACTIVITY); log["youtubeExtensionLastSeen"] = dt.datetime.now().astimezone().isoformat(); save_activity(ACTIVITY, log)
                 return self.json({"ok": True})
             if path == "/api/notion/diagnose":
                 token = str(body.get("token", "")).strip(); parent = str(body.get("parentId", "")).strip()

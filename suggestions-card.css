@@ -1,0 +1,31 @@
+.suggestion-list {
+    display: grid;
+}
+
+@media (max-width:620px) {
+    .suggestion-list {
+        grid-template-columns:1fr
+    }
+    .suggestion-list article {
+        min-height:0;
+        padding:15px 16px
+    }
+    .suggestion-list article:nth-child(odd) {
+        border-right:0
+    }
+    .suggestion-list article:nth-child(n+5) {
+        display:none
+    }
+    .suggestion-list h3 {
+        font-size:14px
+    }
+    .suggestion-list p {
+        font-size:12px
+    }
+    .suggestion-list .save {
+        width:42px;
+        height:42px;
+        border-radius:12px;
+        background:rgba(255, 110, 85, .1)
+    }
+}

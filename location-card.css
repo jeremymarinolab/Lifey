@@ -1,0 +1,184 @@
+.location-archive-actions {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 7px;
+    margin-top: 18px;
+}
+.location-archive-actions .button {
+    min-height: 40px;
+    padding: 8px;
+    font-size: 10px;
+}
+.place-select {
+    display: grid;
+    place-items: center;
+    width: 20px;
+    height: 20px;
+    flex: 0 0 20px;
+    border: 1px solid rgba(242, 250, 246, .43);
+    border-radius: 6px;
+    background: rgba(15, 30, 27, .15);
+    color: #1c2421;
+    cursor: pointer;
+    font: 700 11px 'DM Sans';
+}
+.place-select.selected {
+    background: var(--accent);
+    border-color: var(--accent);
+}
+.merged-place {
+    display: inline-block;
+    margin-left: 6px;
+    color: #ffc978;
+    font-size: 10px;
+    vertical-align: 1px;
+}
+.location-radius, .merge-settings {
+    border-top: 1px solid var(--line);
+    padding: 17px 0;
+}
+.location-radius > div, .merge-settings > div:first-child {
+    display: grid;
+    gap: 4px;
+}
+.location-radius b, .merge-settings b {
+   font-size: 13px;
+}
+.location-radius small, .merge-settings small, .merge-list small {
+   color: var(--muted);
+   font: 10px/1.45 'DM Mono';
+}
+.location-radius output {
+    float: right;
+    margin-top: -33px;
+    color: var(--accent);
+    font: 600 14px 'DM Mono';
+}
+.location-radius input[type="range"] {
+    width: 100%;
+    accent-color: var(--accent);
+    margin: 20px 0 4px;
+}
+.location-radius label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 7px;
+}
+.location-radius label input {
+   width: 80px;
+   margin: 0;
+}
+.merge-list {
+   margin-top: 15px;
+   border: 1px solid var(--line);
+   border-radius: 10px;
+   overflow: hidden;
+}
+.merge-list > div {
+   display: flex;
+   align-items: center;
+   justify-content: space-between;
+   gap: 12px;
+   padding: 11px 12px;
+   border-bottom: 1px solid var(--line);
+}
+.merge-list > div:last-child {
+   border-bottom: 0;
+}
+.merge-list span {
+   display: grid;
+   gap: 3px;
+}
+.merge-list strong {
+   font-size: 12px;
+}
+.merge-list .text-button {
+   color: #ffb3a2;
+}
+.location-empty {
+   padding: 15px 0 0;
+}
+.place-point-list {
+    max-height: 320px;
+    overflow: auto;
+    margin-top: 16px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+}
+.place-point-list > div {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+}
+.place-point-list > div:last-child {
+   border-bottom: 0;
+}
+.place-point-list > div > span {
+   color: var(--accent);
+   font: 11px 'DM Mono';
+}
+.place-point-list p {
+   flex: 1;
+   margin: 0;
+}
+.place-point-list strong, .place-point-list small {
+   display: block;
+}
+.place-point-list strong {
+   font-size: 12px;
+}
+.place-point-list small {
+   margin-top: 3px;
+   color: var(--muted);
+   font: 10px 'DM Mono';
+}
+
+@media (max-width:620px) {
+   .place-list {
+      padding:0 16px 12px
+   }
+   .place-list>div {
+      gap:10px;
+      padding:13px 0
+   }
+   .place-list strong {
+      font-size:13px
+   }
+   .place-list small {
+      font-size:10px;
+      line-height:1.45
+   }
+   .week-places {
+      display:grid;
+      gap:12px
+   }
+   .week-top-places,
+   .week-days {
+      padding:14px 16px
+   }
+   .week-top-places>div:nth-of-type(n+6) {
+      display:none
+   }
+   .week-day-switch {
+      display:flex;
+      gap:7px;
+      overflow:auto;
+      padding-bottom:2px
+   }
+   .week-day-switch button {
+      flex:0 0 47px;
+      min-height:54px
+   }
+   .week-day-summary {
+      grid-template-columns:1fr;
+      padding:9px 0
+   }
+   .week-day-summary span {
+      justify-content:space-between;
+      width:100%;
+      border-radius:12px
+   }
+}
