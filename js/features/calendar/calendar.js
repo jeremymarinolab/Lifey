@@ -109,6 +109,10 @@ export function timelineHeight(scale = DEFAULT_CALENDAR_SCALE) {
   return (normalizedScale.dayEnd - normalizedScale.dayStart) * (normalizedScale.pxPerHour / 60);
 }
 
+export function calendarEmptyMessage(connected) {
+  return connected ? '' : 'Connect Google Calendar to show today’s events.';
+}
+
 export function timelineTicks(scale = DEFAULT_CALENDAR_SCALE) {
   const normalizedScale = normalizeCalendarScale(scale);
   const ticks = [];
