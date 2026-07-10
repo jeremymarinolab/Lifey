@@ -185,3 +185,28 @@
     gap: 8px;
     justify-content: flex-end;
 }
+
+@media (max-width:620px) {
+    .project-list {
+        padding:0 16px 12px
+    }
+    .project-card,
+    .project-card.expanded {
+        padding:0
+    }
+    .project-card-summary {
+        min-height:48px;
+        padding:0 12px
+    }
+    .project-card.expanded .project-card-summary {
+        min-height:48px;
+        margin:0 0 12px;
+        padding:0 12px
+    }
+    .project-detail {
+        padding:0 12px 12px
+    }
+    .project-metrics {
+        grid-template-columns:1fr
+    }
+}

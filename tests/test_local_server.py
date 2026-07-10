@@ -1,4 +1,5 @@
 import io
+import datetime as dt
 import json
 import tempfile
 import unittest
@@ -8,6 +9,8 @@ from unittest.mock import patch
 
 import config_store
 import local_server
+import obsidian_repo
+import places_service
 import routes
 
 
@@ -105,11 +108,63 @@ class RequestSchemaTests(unittest.TestCase):
             routes.validate_json_body("/api/habits/state", {"line": 1, "habit": "Walk", "state": "maybe"})
 
     def test_validate_accepts_mobile_location_batch_shape(self):
-        routes.validate_json_body("/api/location/mobile/ingest", {"samples": [{"id": "1"}]})
+        routes.validate_json_body(
+            "/api/location/mobile/ingest",
+            {"samples": [{"id": "1", "capturedAt": "2026-07-03T12:00:00Z", "latitude": -0.18, "longitude": -78.47}]},
+        )
 
     def test_validate_rejects_oversized_mobile_location_batch(self):
         with self.assertRaisesRegex(routes.ApiError, "too many"):
             routes.validate_json_body("/api/location/mobile/ingest", {"samples": [{}] * 501})
+
+    def test_validate_rejects_malformed_mobile_location_sample(self):
+        with self.assertRaisesRegex(routes.ApiError, "latitude"):
+            routes.validate_json_body(
+                "/api/location/mobile/ingest",
+                {"samples": [{"id": "1", "capturedAt": "2026-07-03T12:00:00Z", "longitude": -78.47}]},
+            )
+
+    def test_validate_accepts_explicit_mobile_token_rotation(self):
+        routes.validate_json_body("/api/location/mobile/setup", {"rotate": True})
+
+    def test_validate_rejects_non_boolean_mobile_token_rotation(self):
+        with self.assertRaisesRegex(routes.ApiError, "rotate"):
+            routes.validate_json_body("/api/location/mobile/setup", {"rotate": "yes"})
+
+    def test_validate_requires_task_completion_boolean(self):
+        with self.assertRaisesRegex(routes.ApiError, "completed"):
+            routes.validate_json_body("/api/obsidian/task", {"line": 1, "text": "Task", "completed": "yes"})
+
+
+class MobileLocationIngestTests(unittest.TestCase):
+    def test_mobile_ingest_rate_limiter_returns_retry_after(self):
+        local_server.MOBILE_INGEST_RATE.clear()
+
+        for index in range(local_server.MOBILE_INGEST_RATE_LIMIT):
+            self.assertEqual(local_server.mobile_ingest_retry_after("100.64.0.2", "token", now=float(index)), 0)
+
+        retry = local_server.mobile_ingest_retry_after("100.64.0.2", "token", now=float(local_server.MOBILE_INGEST_RATE_LIMIT))
+
+        self.assertGreaterEqual(retry, 1)
+
+    def test_mobile_sample_store_reports_duplicates_and_replays(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        with tempfile.TemporaryDirectory() as tmp:
+            samples_path = Path(tmp) / "samples.json"
+            with patch.object(places_service, "MOBILE_LOCATIONS", samples_path):
+                first = places_service.add_mobile_location_samples([
+                    {"id": "same", "capturedAt": now.isoformat(), "latitude": -0.18, "longitude": -78.47, "accuracyMeters": 9},
+                ])
+                second = places_service.add_mobile_location_samples([
+                    {"id": "same", "capturedAt": now.isoformat(), "latitude": -0.18, "longitude": -78.47, "accuracyMeters": 9},
+                    {"id": "old", "capturedAt": (now - dt.timedelta(days=45)).isoformat(), "latitude": -0.18, "longitude": -78.47},
+                ])
+
+        self.assertEqual(first["accepted"], 1)
+        self.assertEqual(first["stored"], 1)
+        self.assertEqual(second["accepted"], 0)
+        self.assertEqual(second["duplicates"], 1)
+        self.assertEqual(second["replayed"], 1)
 
 
 class ConfigTests(unittest.TestCase):
@@ -139,6 +194,24 @@ class ConfigTests(unittest.TestCase):
         integrations = updates["profilePreferences"]["integrations"]
         self.assertEqual(integrations["google"], {"clientId": "client"})
         self.assertEqual(integrations["spotify"], {"clientId": "spotify"})
+
+
+class ObsidianPathTests(unittest.TestCase):
+    def test_shell_escaped_icloud_path_is_normalized(self):
+        path = obsidian_repo.normalize_obsidian_path("/Users/life/Library/Mobile\\ Documents/iCloud\\~md\\~obsidian/Documents/Lab")
+
+        self.assertEqual(str(path), "/Users/life/Library/Mobile Documents/iCloud~md~obsidian/Documents/Lab")
+
+    def test_vault_root_discovers_journals_daily_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "Lab"
+            daily = root / "journals" / "Daily"
+            daily.mkdir(parents=True)
+
+            with patch.object(obsidian_repo, "config", return_value={"dailyNotesPath": str(root)}):
+                candidates = obsidian_repo.daily_candidate_folders()
+
+        self.assertIn(daily, candidates)
 
 
 class MarkdownTests(unittest.TestCase):

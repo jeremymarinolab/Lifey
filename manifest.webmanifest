@@ -1,7 +1,7 @@
 {
   "name": "Lifey",
   "short_name": "Lifey",
-  "description": "Your local-first daily command center.",
+  "description": "Your local-first daily workspace.",
   "start_url": "./",
   "display": "standalone",
   "background_color": "#2F383E",

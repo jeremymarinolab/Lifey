@@ -220,9 +220,6 @@ body.has-dashboard-image {
 .merge-list .text-button {
    color: #ffb3a2;
 }
-.location-empty {
-   padding: 15px 0 0;
-}
 .archive-settings {
     display: grid;
     gap: 18px;

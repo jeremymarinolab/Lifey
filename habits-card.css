@@ -262,3 +262,54 @@
     padding-top: 10px;
     border-top: 1px solid rgba(235, 249, 241, .1);
 }
+
+@media (max-width:620px) {
+    .habit-row {
+        grid-template-columns:40px minmax(0, 1fr) auto 40px;
+        padding:13px 16px
+    }
+    .habit-row .check {
+        width:34px;
+        height:34px
+    }
+    .habit-row p {
+        font-size:14px
+    }
+    .habit-period>header {
+        padding:12px 16px 7px
+    }
+    .habit-period>header small {
+        font-size:8px
+    }
+    .habit-signals {
+        gap:4px
+    }
+    .habit-streak,
+    .habit-missed {
+        padding:5px 7px;
+        font-size:8px
+    }
+    .habit-range,
+    .habit-selector,
+    .habit-calendar,
+    .habit-graph,
+    .archived-habits {
+        padding-right:16px;
+        padding-left:16px
+    }
+    .habit-month-grid span {
+        min-height:34px;
+        border-radius:10px
+    }
+    .habit-graph {
+        min-height:92px;
+        padding-bottom:4px
+    }
+    .habit-graph.month-view {
+        grid-template-columns:repeat(31, minmax(0, 1fr));
+        gap:2px
+    }
+    .habit-graph i {
+        width:5px
+    }
+}

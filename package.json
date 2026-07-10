@@ -2,6 +2,7 @@
   "name": "lifey",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "assets:version": "node scripts/sync-asset-version.mjs",
     "check:assets": "node scripts/sync-asset-version.mjs --check",
@@ -9,7 +10,15 @@
     "start": "python3 local_server.py",
     "prestart:lan": "npm run assets:version",
     "start:lan": "LIFEY_LAN=1 python3 local_server.py",
-    "test": "python3 -m unittest discover -s tests",
-    "check": "npm run check:assets && node --check app.js && python3 -m py_compile local_server.py && npm test"
+    "lint": "node scripts/lint-format.mjs lint",
+    "format": "node scripts/lint-format.mjs format",
+    "format:check": "node scripts/lint-format.mjs format:check",
+    "test": "python3 -m unittest discover -s tests && node --test tests/js/*.test.mjs",
+    "test:smoke": "PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers playwright test",
+    "browsers:install": "PLAYWRIGHT_BROWSERS_PATH=.playwright-browsers playwright install chromium",
+    "check": "npm run check:assets && npm run format:check && npm run lint && npm test && npm run test:smoke"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1"
   }
 }

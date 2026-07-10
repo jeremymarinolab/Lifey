@@ -3,12 +3,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-LABEL="com.lifey.dashboard"
+PROJECT_ROOT="$(cd "$ROOT/.." && pwd)"
+LABEL="com.lifey.app"
+LEGACY_LABEL="com.lifey.dashboard"
 TARGET="$HOME/Library/LaunchAgents/$LABEL.plist"
+LEGACY_TARGET="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 DOMAIN="gui/$(id -u)"
 
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/Lifey"
-cp "$ROOT/$LABEL.plist" "$TARGET"
+sed \
+  -e "s#__LIFEY_START_SCRIPT__#$ROOT/start-lifey.sh#g" \
+  -e "s#__LIFEY_PROJECT_ROOT__#$PROJECT_ROOT#g" \
+  "$ROOT/$LABEL.plist" > "$TARGET"
+/bin/launchctl bootout "$DOMAIN" "$LEGACY_TARGET" >/dev/null 2>&1 || true
+rm -f "$LEGACY_TARGET"
 /bin/launchctl bootout "$DOMAIN" "$TARGET" >/dev/null 2>&1 || true
 /bin/launchctl bootstrap "$DOMAIN" "$TARGET"
 /bin/launchctl kickstart -k "$DOMAIN/$LABEL"

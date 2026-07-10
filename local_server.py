@@ -8,6 +8,7 @@ DASHBOARD marker block while saving a sibling backup. It never listens beyond
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -59,6 +60,7 @@ from obsidian_repo import (
     journals_folder,
     line_in_habit_section,
     note_safe_name,
+    resolve_obsidian_root,
     wiki_place,
 )
 from places_service import (
@@ -82,6 +84,25 @@ from task_service import insert_task_under_tasks, target_note_for_new_task
 
 ROOT = Path(__file__).resolve().parent
 ACTIVITY = ROOT / ".activity-log.json"
+MOBILE_INGEST_RATE_WINDOW_SECONDS = 60
+MOBILE_INGEST_RATE_LIMIT = 30
+MOBILE_INGEST_RATE: dict[tuple[str, str], list[float]] = {}
+MOBILE_INGEST_RATE_LOCK = threading.Lock()
+
+
+def mobile_ingest_retry_after(client: str, token: str, now: float | None = None) -> int:
+    """Return seconds to wait when this collector is over the ingest request rate."""
+    timestamp = time.time() if now is None else now
+    token_fingerprint = hashlib.sha256(token.encode()).hexdigest()[:16]
+    key = (client, token_fingerprint)
+    with MOBILE_INGEST_RATE_LOCK:
+        recent = [item for item in MOBILE_INGEST_RATE.get(key, []) if timestamp - item < MOBILE_INGEST_RATE_WINDOW_SECONDS]
+        if len(recent) >= MOBILE_INGEST_RATE_LIMIT:
+            MOBILE_INGEST_RATE[key] = recent
+            return max(1, int(MOBILE_INGEST_RATE_WINDOW_SECONDS - (timestamp - recent[0])))
+        recent.append(timestamp)
+        MOBILE_INGEST_RATE[key] = recent
+    return 0
 
 
 def tailscale_ipv4() -> str | None:
@@ -348,6 +369,7 @@ def build_api_routes() -> RouteRegistry:
         ("/api/location/mobile/setup", "location"),
         ("/api/location/mobile/ingest", "location"),
         ("/api/obsidian/config", "obsidian"),
+        ("/api/obsidian/pick-folder", "obsidian"),
         ("/api/profile/preferences", "profile"),
         ("/api/profile/import", "profile"),
         ("/api/projects/create", "projects"),
@@ -592,20 +614,47 @@ class Handler(SimpleHTTPRequestHandler):
                 # This endpoint is intentionally local-only because it returns the collector secret.
                 if self.client_address[0] not in {"127.0.0.1", "::1"}:
                     return self.json({"error": "Create the Lifey Location token from the Mac app."}, HTTPStatus.FORBIDDEN)
-                return self.json({"token": location_collector_token()})
+                rotate = body.get("rotate") is True
+                return self.json({"token": location_collector_token(rotate=rotate), "rotated": rotate, "tokenCreatedAt": config().get("lifeyLocationTokenCreatedAt", "")})
             if path == "/api/location/mobile/ingest":
                 supplied = self.headers.get("Authorization", "").removeprefix("Bearer ").strip()
                 if not secrets.compare_digest(supplied, str(config().get("lifeyLocationToken", ""))):
                     return self.json({"error": "Lifey Location is not authorised."}, HTTPStatus.UNAUTHORIZED)
+                retry_after = mobile_ingest_retry_after(self.client_address[0], supplied)
+                if retry_after:
+                    return self.json({"error": "Too many Lifey Location sync attempts.", "retryAfterSeconds": retry_after}, HTTPStatus.TOO_MANY_REQUESTS)
                 samples = body.get("samples", [])
                 if not isinstance(samples, list):
                     return self.json({"error": "Invalid location batch."}, HTTPStatus.BAD_REQUEST)
-                added, total = add_mobile_location_samples(samples)
-                return self.json({"accepted": added, "stored": total})
+                return self.json(add_mobile_location_samples(samples))
             if path == "/api/obsidian/config":
-                folder = Path(body.get("dailyNotesPath", "")).expanduser()
-                if not folder.is_dir():
-                    return self.json({"error": "That Daily notes folder does not exist."}, HTTPStatus.BAD_REQUEST)
+                try:
+                    folder = resolve_obsidian_root(str(body.get("dailyNotesPath", "")))
+                except FileNotFoundError as error:
+                    return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+                save_config({"dailyNotesPath": str(folder)})
+                return self.json({"dailyNotesPath": str(folder)})
+            if path == "/api/obsidian/pick-folder":
+                if self.client_address[0] not in {"127.0.0.1", "::1"}:
+                    return self.json({"error": "Choose the Obsidian folder from Lifey on the Mac at http://127.0.0.1:4173."}, HTTPStatus.FORBIDDEN)
+                script = '\n'.join([
+                    'tell application "Finder" to activate',
+                    'delay 0.2',
+                    'POSIX path of (choose folder with prompt "Choose your Obsidian vault, Journals folder, or Daily folder for Lifey")',
+                ])
+                try:
+                    result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120, check=False)
+                except subprocess.TimeoutExpired:
+                    return self.json({"error": "Folder picker timed out. Paste the folder path instead, or try again from Lifey on the Mac."}, HTTPStatus.BAD_REQUEST)
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    if "User canceled" in detail or str(result.returncode) == "1":
+                        detail = "Folder selection was cancelled."
+                    return self.json({"error": detail or "macOS could not open the folder picker. Paste the folder path instead."}, HTTPStatus.BAD_REQUEST)
+                try:
+                    folder = resolve_obsidian_root(result.stdout.strip())
+                except FileNotFoundError as error:
+                    return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
                 save_config({"dailyNotesPath": str(folder)})
                 return self.json({"dailyNotesPath": str(folder)})
             if path == "/api/profile/preferences":

@@ -1,11 +1,13 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const checkOnly = process.argv.includes('--check');
 const VERSIONED_EXTENSIONS = new Set(['.css', '.js', '.webmanifest']);
+const STATIC_SHELL_ENTRIES = ['./', './index.html'];
+const SHELL_BLOCK_PATTERN = /(?:\/\/ Generated from index\.html, imported JS modules, and manifest\.webmanifest\.\n)?const SHELL = \[[\s\S]*?\];/;
 
 function read(path) {
   return readFileSync(join(root, path));
@@ -21,20 +23,29 @@ function requiresVersion(asset) {
   return [...VERSIONED_EXTENSIONS].some(extension => asset.endsWith(extension));
 }
 
-function versionedAssetsFromHtml(html) {
+function unique(items) {
+  return [...new Set(items)];
+}
+
+function localAssetsFromHtml(html) {
   const assets = [];
+  for (const match of html.matchAll(/\b(?:href|src)="([^"]+)"/g)) {
+    const value = match[1];
+    const asset = localAssetPath(value);
+    if (asset && !assets.includes(asset)) assets.push(asset);
+  }
+  return assets;
+}
+
+function versionedAssetsFromHtml(html) {
   const missingVersion = [];
   for (const match of html.matchAll(/\b(?:href|src)="([^"]+)"/g)) {
     const value = match[1];
     const asset = localAssetPath(value);
-    if (!asset || !requiresVersion(asset)) continue;
-    if (!/[?&]v=[^&#"]+/.test(value)) missingVersion.push(asset);
-    if (!assets.includes(asset)) assets.push(asset);
+    if (asset && requiresVersion(asset) && !/[?&]v=[^&#"]+/.test(value)) missingVersion.push(asset);
   }
-  if (missingVersion.length) {
-    throw new Error(`index.html local shell assets need ?v=: ${missingVersion.join(', ')}`);
-  }
-  return assets;
+  if (missingVersion.length) throw new Error(`index.html local shell assets need ?v=: ${missingVersion.join(', ')}`);
+  return localAssetsFromHtml(html).filter(requiresVersion);
 }
 
 function resolveImportAsset(specifier, fromAsset) {
@@ -52,17 +63,41 @@ function importedAssets(asset, seen = new Set()) {
     const imported = resolveImportAsset(match[1], asset);
     if (imported && !direct.includes(imported)) direct.push(imported);
   }
-  return direct.flatMap(imported => [imported, ...importedAssets(imported, seen)]).filter((item, index, list) => list.indexOf(item) === index);
+  return unique(direct.flatMap(imported => [imported, ...importedAssets(imported, seen)]));
 }
 
 function versionedAssetGraph(html) {
   const roots = versionedAssetsFromHtml(html);
-  return roots.flatMap(asset => [asset, ...importedAssets(asset)]).filter((item, index, list) => list.indexOf(item) === index);
+  return unique(roots.flatMap(asset => [asset, ...importedAssets(asset)]));
 }
 
-function assetVersion(versionedAssets) {
+function manifestAssets(manifestAsset) {
+  if (!manifestAsset || !manifestAsset.endsWith('.webmanifest')) return [];
+  const manifest = JSON.parse(read(manifestAsset).toString());
+  const assetValues = [];
+  for (const collectionName of ['icons', 'screenshots', 'shortcuts']) {
+    const collection = Array.isArray(manifest[collectionName]) ? manifest[collectionName] : [];
+    for (const item of collection) {
+      if (item?.src) assetValues.push(item.src);
+      if (Array.isArray(item?.icons)) assetValues.push(...item.icons.map(icon => icon?.src).filter(Boolean));
+    }
+  }
+  return unique(assetValues.map(localAssetPath).filter(Boolean));
+}
+
+function shellAssetGraph(html) {
+  const htmlAssets = localAssetsFromHtml(html);
+  const imported = htmlAssets.flatMap(asset => importedAssets(asset));
+  const manifestReferenced = htmlAssets.flatMap(asset => manifestAssets(asset));
+  const assets = unique([...htmlAssets, ...imported, ...manifestReferenced]);
+  const missing = assets.filter(asset => !existsSync(join(root, asset)));
+  if (missing.length) throw new Error(`Local shell assets do not exist: ${missing.join(', ')}`);
+  return assets;
+}
+
+function assetVersion(shellAssets) {
   const hash = createHash('sha256');
-  for (const asset of versionedAssets) {
+  for (const asset of shellAssets) {
     hash.update(asset);
     hash.update('\0');
     hash.update(read(asset));
@@ -84,48 +119,33 @@ function replaceCacheVersion(worker, version) {
   return worker.replace(/const CACHE = 'lifey-shell-v[^']+';/, `const CACHE = 'lifey-shell-v${version}';`);
 }
 
-function shellEntriesFromWorker(worker) {
-  const match = worker.match(/const SHELL = \[([\s\S]*?)\];/);
-  if (!match) throw new Error('service-worker.js SHELL list was not found.');
-  return [...match[1].matchAll(/'([^']+)'/g)].map(item => item[1]);
+function shellEntries(shellAssets) {
+  return unique([...STATIC_SHELL_ENTRIES, ...shellAssets.map(asset => `./${asset}`)]);
 }
 
-function shellAssetsFromWorker(worker) {
-  return shellEntriesFromWorker(worker).map(item => localAssetPath(item)).filter(Boolean);
+function replaceShellAssets(worker, shellAssets) {
+  const rendered = `// Generated from index.html, imported JS modules, and manifest.webmanifest.\nconst SHELL = [\n${shellEntries(shellAssets).map(entry => `  '${entry}'`).join(',\n')}\n];`;
+  if (!SHELL_BLOCK_PATTERN.test(worker)) throw new Error('service-worker.js SHELL list was not found.');
+  return worker.replace(SHELL_BLOCK_PATTERN, rendered);
 }
 
-function replaceShellAssets(worker, versionedAssets) {
-  const existingEntries = shellEntriesFromWorker(worker);
-  const fixedEntries = ['./', './index.html'];
-  const versionedEntries = versionedAssets.map(asset => `./${asset}`);
-  const unversionedEntries = existingEntries.filter(entry => {
-    const asset = localAssetPath(entry);
-    return asset && asset !== 'index.html' && !requiresVersion(asset);
-  });
-  const nextEntries = [...new Set([...fixedEntries, ...versionedEntries, ...unversionedEntries])];
-  const rendered = `const SHELL = [\n${nextEntries.map(entry => `  '${entry}'`).join(',\n')}\n];`;
-  return worker.replace(/const SHELL = \[[\s\S]*?\];/, rendered);
-}
-
-function assertShellAssets(worker, versionedAssets) {
-  const shellAssets = shellAssetsFromWorker(worker);
-  const missing = versionedAssets.filter(asset => !worker.includes(`'./${asset}'`));
+function assertShellAssets(worker, shellAssets) {
+  const missing = shellEntries(shellAssets).filter(entry => !worker.includes(`'${entry}'`));
   if (missing.length) throw new Error(`service-worker.js SHELL is missing: ${missing.join(', ')}`);
-  const unreferenced = shellAssets.filter(asset => requiresVersion(asset) && asset !== 'index.html' && !versionedAssets.includes(asset));
-  if (unreferenced.length) throw new Error(`service-worker.js SHELL has versioned assets not referenced by index.html: ${unreferenced.join(', ')}`);
 }
 
 const html = read('index.html').toString();
 const worker = read('service-worker.js').toString();
 const versionedAssets = versionedAssetGraph(html);
-const version = assetVersion(versionedAssets);
-const nextWorker = replaceShellAssets(replaceCacheVersion(worker, version), versionedAssets);
+const shellAssets = shellAssetGraph(html);
+const version = assetVersion(shellAssets);
+const nextWorker = replaceShellAssets(replaceCacheVersion(worker, version), shellAssets);
 const files = [
   ['index.html', replaceAssetVersions(html, version, versionedAssets)],
   ['service-worker.js', nextWorker]
 ];
 
-assertShellAssets(files[1][1], versionedAssets);
+assertShellAssets(files[1][1], shellAssets);
 
 const changed = files.filter(([path, next]) => read(path).toString() !== next);
 

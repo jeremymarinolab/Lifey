@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 import re
+import shlex
 
 from config_store import config
 
@@ -89,13 +90,39 @@ def daily_candidate_folders() -> list[Path]:
     folder = Path(raw).expanduser()
     if not folder.is_dir():
         raise FileNotFoundError("Configure an existing Journals or Daily notes folder first.")
-    folders = [folder]
-    folders.append(folder.parent if folder.name.lower() == "daily" else folder / "Daily")
+    folders = [
+        folder,
+        folder.parent if folder.name.lower() == "daily" else folder / "Daily",
+        folder / "journals",
+        folder / "journals" / "Daily",
+        folder / "Journals",
+        folder / "Journals" / "Daily",
+    ]
     unique: list[Path] = []
     for item in folders:
-        if item not in unique:
+        if item.is_dir() and item not in unique:
             unique.append(item)
     return unique
+
+
+def normalize_obsidian_path(value: str) -> Path:
+    raw = str(value or "").strip()
+    if not raw:
+        return Path("")
+    try:
+        parts = shlex.split(raw)
+        if len(parts) == 1:
+            raw = parts[0]
+    except ValueError:
+        raw = raw.replace("\\ ", " ").replace("\\~", "~")
+    return Path(raw).expanduser()
+
+
+def resolve_obsidian_root(value: str) -> Path:
+    folder = normalize_obsidian_path(value)
+    if not folder.is_dir():
+        raise FileNotFoundError("That Obsidian vault, Journals, or Daily folder does not exist.")
+    return folder
 
 
 def daily_file() -> Path:
@@ -121,7 +148,15 @@ def journals_folder() -> Path:
     folder = Path(config().get("dailyNotesPath", "")).expanduser()
     if not folder.is_dir():
         raise FileNotFoundError("Configure your Journals folder first.")
-    return folder.parent if folder.name.lower() == "daily" else folder
+    if folder.name.lower() == "daily":
+        return folder.parent
+    if folder.name.lower() in {"journals", "journal"}:
+        return folder
+    for name in ("journals", "Journals", "journal", "Journal"):
+        candidate = folder / name
+        if candidate.is_dir():
+            return candidate
+    return folder
 
 
 def vault_folder() -> Path:

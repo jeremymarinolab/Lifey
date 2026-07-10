@@ -6,7 +6,7 @@ at `http://127.0.0.1:4173`; no YouTube or Google account access is requested.
 
 ## Install temporarily in Zen
 
-1. Start the dashboard with `npm start`.
+1. Start Lifey with `npm start`.
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on**.
 4. Select this folder's `manifest.json`.

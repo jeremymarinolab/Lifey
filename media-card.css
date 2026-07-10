@@ -1,4 +1,4 @@
-.places-switch {
+.segmented-control {
     display: flex;
     gap: 4px;
     margin: 0 20px 8px;
@@ -7,7 +7,7 @@
     border-radius: 9px;
     background: rgba(17, 35, 31, .22);
 }
-.places-switch button {
+.segmented-control button {
     flex: 1;
     border: 0;
     border-radius: 6px;
@@ -17,14 +17,14 @@
     font: 600 10px 'DM Sans';
     cursor: pointer;
 }
-.places-switch button.selected {
+.segmented-control button.selected {
     background: rgba(255, 255, 255, .14);
     color: var(--ink);
 }
 .media-switch {
     margin-bottom: 10px;
 }
-.youtube-filter {
+.segmented-filter {
     display: flex;
     gap: 4px;
     margin: 0 20px 8px;
@@ -33,7 +33,7 @@
     border-radius: 9px;
     background: rgba(17, 35, 31, .18);
 }
-.youtube-filter button {
+.segmented-filter button {
     flex: 1;
     min-height: 28px;
     border: 0;
@@ -43,7 +43,7 @@
     font: 600 10px 'DM Sans';
     cursor: pointer;
 }
-.youtube-filter button.selected {
+.segmented-filter button.selected {
     background: rgba(255, 255, 255, .14);
     color: var(--ink);
 }
@@ -184,4 +184,30 @@
     padding: 0 0 10px;
     color: var(--muted);
     font: 10px 'DM Mono';
+}
+
+@media (max-width:620px) {
+    .activity-stack {
+        gap:14px
+    }
+    .compact .track {
+        padding:2px 16px 15px
+    }
+    .video-list>div {
+        padding:12px 16px
+    }
+    .artists {
+        padding:12px 16px;
+        overflow:auto
+    }
+    .segmented-control {
+        margin:0 16px 8px
+    }
+    .segmented-filter {
+        margin:0 16px 8px
+    }
+    .segmented-control button {
+        min-height:38px;
+        border-radius:11px
+    }
 }

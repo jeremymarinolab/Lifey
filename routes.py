@@ -98,6 +98,28 @@ def int_field(body: dict, key: str, *, minimum: int | None = None, maximum: int 
     return value
 
 
+def float_field(body: dict, key: str, *, minimum: float | None = None, maximum: float | None = None) -> float:
+    try:
+        value = float(body.get(key))
+    except (TypeError, ValueError) as error:
+        raise ApiError(f"{key} must be a number.") from error
+    if minimum is not None and value < minimum:
+        raise ApiError(f"{key} is too small.")
+    if maximum is not None and value > maximum:
+        raise ApiError(f"{key} is too large.")
+    return value
+
+
+def bool_field(body: dict, key: str, *, required: bool = False) -> bool:
+    if key not in body:
+        if required:
+            raise ApiError(f"{key} is required.")
+        return False
+    if not isinstance(body.get(key), bool):
+        raise ApiError(f"{key} must be true or false.")
+    return body[key]
+
+
 def dict_field(body: dict, key: str, *, required: bool = False) -> dict:
     value = body.get(key, {})
     if required and not isinstance(value, dict):
@@ -118,9 +140,27 @@ def list_field(body: dict, key: str, *, required: bool = False, max_length: int 
     return value
 
 
+def validate_mobile_sample(sample: Any, index: int) -> None:
+    if not isinstance(sample, dict):
+        raise ApiError(f"samples[{index}] must be an object.")
+    string_field(sample, "id", required=True, max_length=200)
+    string_field(sample, "capturedAt", required=True, max_length=100)
+    float_field(sample, "latitude", minimum=-90, maximum=90)
+    float_field(sample, "longitude", minimum=-180, maximum=180)
+    if "accuracy" in sample:
+        float_field(sample, "accuracy", minimum=0, maximum=100_000)
+    if "accuracyMeters" in sample:
+        float_field(sample, "accuracyMeters", minimum=0, maximum=100_000)
+
+
 def validate_json_body(path: str, body: dict) -> None:
-    if path == "/api/location/mobile/ingest":
-        list_field(body, "samples", required=True, max_length=500)
+    if path == "/api/location/mobile/setup":
+        if "rotate" in body:
+            bool_field(body, "rotate")
+    elif path == "/api/location/mobile/ingest":
+        samples = list_field(body, "samples", required=True, max_length=500)
+        for index, sample in enumerate(samples):
+            validate_mobile_sample(sample, index)
     elif path == "/api/obsidian/config":
         string_field(body, "dailyNotesPath", required=True)
     elif path == "/api/profile/preferences":
@@ -174,6 +214,8 @@ def validate_json_body(path: str, body: dict) -> None:
             string_field(body, "text", required=True, max_length=2_000)
         else:
             string_field(body, "text", required=True, max_length=2_000)
+            if path == "/api/obsidian/task":
+                bool_field(body, "completed", required=True)
     elif path == "/api/obsidian/task/add":
         string_field(body, "text", required=True, max_length=2_000)
     elif path == "/api/notion/config":

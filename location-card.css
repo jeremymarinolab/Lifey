@@ -135,3 +135,50 @@
    color: var(--muted);
    font: 10px 'DM Mono';
 }
+
+@media (max-width:620px) {
+   .place-list {
+      padding:0 16px 12px
+   }
+   .place-list>div {
+      gap:10px;
+      padding:13px 0
+   }
+   .place-list strong {
+      font-size:13px
+   }
+   .place-list small {
+      font-size:10px;
+      line-height:1.45
+   }
+   .week-places {
+      display:grid;
+      gap:12px
+   }
+   .week-top-places,
+   .week-days {
+      padding:14px 16px
+   }
+   .week-top-places>div:nth-of-type(n+6) {
+      display:none
+   }
+   .week-day-switch {
+      display:flex;
+      gap:7px;
+      overflow:auto;
+      padding-bottom:2px
+   }
+   .week-day-switch button {
+      flex:0 0 47px;
+      min-height:54px
+   }
+   .week-day-summary {
+      grid-template-columns:1fr;
+      padding:9px 0
+   }
+   .week-day-summary span {
+      justify-content:space-between;
+      width:100%;
+      border-radius:12px
+   }
+}

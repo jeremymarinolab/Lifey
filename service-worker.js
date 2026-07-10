@@ -1,8 +1,14 @@
-const CACHE = 'lifey-shell-v4aff4eb9ffe0';
+const CACHE = 'lifey-shell-ve10627852f9e';
+// Generated from index.html, imported JS modules, and manifest.webmanifest.
 const SHELL = [
   './',
   './index.html',
   './manifest.webmanifest',
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-20@2x.png',
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-29@2x.png',
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-40@2x.png',
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-60@2x.png',
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-60@3x.png',
   './styles.css',
   './preferences.css',
   './capture.css',
@@ -16,22 +22,31 @@ const SHELL = [
   './habits-card.css',
   './location-card.css',
   './calendar-card.css',
+  './suggestions-card.css',
   './mobile.css',
   './app.js',
   './js/actions.js',
   './js/api.js',
+  './js/features/calendar/calendar.js',
   './js/features/capture/capture.js',
   './js/features/capture/controller.js',
   './js/features/habits/habits.js',
   './js/features/location/controller.js',
   './js/features/location/location.js',
+  './js/features/location/render.js',
+  './js/renderers.js',
+  './js/ui/components.js',
+  './js/ui/controls.js',
+  './js/features/media/render.js',
+  './js/ui/config.js',
   './js/features/preferences/controller.js',
   './js/features/projects/controller.js',
+  './js/features/projects/render.js',
+  './js/features/tasks/render.js',
   './js/integrations/spotify.js',
   './js/parsers.js',
-  './js/renderers.js',
   './js/state.js',
-  './lifey-icon.svg'
+  './LifeyLocation/Assets.xcassets/AppIcon.appiconset/LifeyLogo-1024.png'
 ];
 
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting())));

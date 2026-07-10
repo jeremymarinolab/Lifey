@@ -13,7 +13,39 @@
   --spotify:#78d39b;
   --calendar:#c8d0d0;
   --tasks:#fff;
-  --violet:#c8bbff
+  --violet:#c8bbff;
+  --space-1:4px;
+  --space-2:8px;
+  --space-3:12px;
+  --space-4:16px;
+  --space-5:20px;
+  --space-6:24px;
+  --space-7:32px;
+  --space-8:42px;
+  --radius-xs:5px;
+  --radius-sm:8px;
+  --radius-md:12px;
+  --radius-lg:16px;
+  --radius-xl:24px;
+  --radius-pill:999px;
+  --ui-radius:16px;
+  --card-radius:16px;
+  --button-radius:10px;
+  --surface-panel:linear-gradient(135deg, var(--glass-highlight), rgba(70, 99, 91, .16) 45%, rgba(28, 49, 44, .17));
+  --surface-panel-border:var(--line);
+  --surface-control:rgba(245, 255, 250, .05);
+  --surface-control-hover:rgba(255, 255, 255, .14);
+  --surface-input:rgba(20, 39, 34, .38);
+  --shadow-control:inset 0 1px 0 rgba(255, 255, 255, .12);
+  --shadow-panel:inset 0 1px 0 rgba(255, 255, 255, .14), 0 17px 42px rgba(23, 38, 35, .13);
+  --shadow-panel-strong:0 30px 80px #111c1ae0;
+  --button-primary-bg:linear-gradient(135deg, #ff856b, var(--accent-deep));
+  --button-primary-fg:#241613;
+  --button-ghost-bg:rgba(237, 249, 241, .08);
+  --button-ghost-border:rgba(235, 249, 239, .18);
+  --button-danger-bg:rgba(255, 92, 92, .18);
+  --button-danger-border:rgba(255, 132, 132, .38);
+  --button-danger-fg:#ffd1c9
 }
 * {
   box-sizing:border-box
@@ -31,7 +63,7 @@ body {
 .shell {
   max-width:1440px;
   margin:auto;
-  padding:0 42px 64px
+  padding:0 var(--space-8) 64px
 }
 nav {
   height:76px;
@@ -43,7 +75,7 @@ nav {
 .brand {
   display:flex;
   align-items:center;
-  gap:10px;
+  gap:var(--space-3);
   color:var(--ink);
   text-decoration:none
 }
@@ -52,7 +84,7 @@ nav {
   place-items:center;
   width:34px;
   height:34px;
-  border-radius:11px;
+  border-radius:var(--radius-md);
   background:linear-gradient(145deg, rgba(255, 255, 255, .25), rgba(148, 194, 173, .12));
   border:1px solid rgba(255, 255, 255, .22);
   box-shadow:inset 0 1px 0 rgba(255, 255, 255, .25), 0 7px 20px rgba(20, 38, 34, .14);
@@ -64,16 +96,16 @@ nav {
 }
 .nav-actions, .hero-actions {
   display:flex;
-  gap:10px;
+  gap:var(--space-3);
   align-items:center
 }
 .button {
   border:1px solid transparent;
-  border-radius:10px;
+  border-radius:var(--button-radius);
   padding:10px 14px;
-  background:linear-gradient(135deg, #ff856b, var(--accent-deep));
+  background:var(--button-primary-bg);
   box-shadow:0 7px 18px rgba(105, 35, 25, .23), inset 0 1px 0 rgba(255, 255, 255, .24);
-  color:#241613;
+  color:var(--button-primary-fg);
   font-weight:700;
   font-family:inherit;
   cursor:pointer;
@@ -84,10 +116,19 @@ nav {
   transform:translateY(-1px)
 }
 .button.ghost {
-  background:rgba(237, 249, 241, .08);
-  border-color:rgba(235, 249, 239, .18);
-  box-shadow:inset 0 1px 0 rgba(255, 255, 255, .12);
+  background:var(--button-ghost-bg);
+  border-color:var(--button-ghost-border);
+  box-shadow:var(--shadow-control);
   color:var(--ink)
+}
+.button.primary {
+  background:var(--button-primary-bg);
+  color:var(--button-primary-fg)
+}
+.button.danger {
+  background:var(--button-danger-bg);
+  border-color:var(--button-danger-border);
+  color:var(--button-danger-fg)
 }
 .settings {
   display:flex;
@@ -108,7 +149,7 @@ nav {
   font:500 10px 'DM Mono';
   color:var(--muted);
   border:1px solid var(--line);
-  border-radius:5px;
+  border-radius:var(--radius-xs);
   padding:3px 5px;
   background:rgba(0, 0, 0, .1)
 }
@@ -166,21 +207,21 @@ nav {
 .grid {
   display:grid;
   grid-template-columns:1.06fr 1fr .86fr;
-  gap:20px
+  gap:var(--space-5)
 }
 .panel {
-  background:linear-gradient(135deg, var(--glass-highlight), rgba(70, 99, 91, .16) 45%, rgba(28, 49, 44, .17));
-  border:1px solid var(--line);
-  border-radius:16px;
+  background:var(--surface-panel);
+  border:1px solid var(--surface-panel-border);
+  border-radius:var(--card-radius);
   overflow:hidden;
-  box-shadow:inset 0 1px 0 rgba(255, 255, 255, .14), 0 17px 42px rgba(23, 38, 35, .13);
+  box-shadow:var(--shadow-panel);
   backdrop-filter:blur(18px) saturate(118%)
 }
 .panel header {
-  padding:20px 20px 15px;
+  padding:var(--space-5) var(--space-5) 15px;
   display:flex;
   justify-content:space-between;
-  gap:10px;
+  gap:var(--space-3);
   align-items:start
 }
 h2 {
@@ -202,7 +243,7 @@ h2 {
   font:500 9px 'DM Mono';
   letter-spacing:.04em;
   padding:4px 6px;
-  border-radius:5px;
+  border-radius:var(--radius-xs);
   background:rgba(241, 249, 245, .1);
   color:#dce7e1;
   white-space:nowrap
@@ -232,8 +273,8 @@ h2 {
 }
 .task {
   display:flex;
-  gap:11px;
-  padding:15px 20px;
+  gap:var(--space-3);
+  padding:15px var(--space-5);
   border-top:1px solid var(--line);
   align-items:flex-start
 }
@@ -247,7 +288,7 @@ h2 {
   border:1px solid rgba(242, 250, 246, .43);
   background:rgba(15, 30, 27, .15);
   color:#1c2421;
-  border-radius:50%;
+  border-radius:var(--radius-pill);
   flex:0 0 auto;
   cursor:pointer;
   font-size:12px;
@@ -275,14 +316,14 @@ h2 {
 }
 .task-actions {
   display:flex;
-  gap:5px
+  gap:var(--space-1)
 }
 .icon-button {
   width:26px;
   height:26px;
   border:1px solid var(--line);
-  background:rgba(245, 255, 250, .05);
-  border-radius:7px;
+  background:var(--surface-control);
+  border-radius:var(--button-radius);
   color:var(--muted);
   cursor:pointer;
   font-size:12px
@@ -292,9 +333,14 @@ h2 {
   border-color:rgba(255, 145, 124, .48);
   color:#ffb3a2
 }
+.icon-button.danger {
+  background:var(--button-danger-bg);
+  border-color:var(--button-danger-border);
+  color:var(--button-danger-fg)
+}
 .panel footer {
   border-top:1px solid var(--line);
-  padding:13px 20px;
+  padding:13px var(--space-5);
   display:flex;
   justify-content:space-between;
   color:var(--muted);
@@ -307,6 +353,9 @@ h2 {
   font:500 11px 'DM Sans';
   padding:0;
   cursor:pointer
+}
+.text-button.danger {
+  color:var(--button-danger-fg)
 }
 .timeline {
   padding:9px 20px 19px;
@@ -657,6 +706,31 @@ dialog::backdrop {
   color:var(--muted);
   line-height:1.55
 }
+.calendar-time-parts {
+  display:inline-grid;
+  grid-template-columns:58px auto 58px auto 64px;
+  align-items:center;
+  gap:8px;
+  margin-top:8px;
+  padding:8px;
+  border:1px solid rgba(240, 248, 242, .18);
+  border-radius:var(--button-radius, 14px);
+  background:rgba(16, 30, 27, .22)
+}
+.calendar-time-parts input {
+  width:100%;
+  margin:0;
+  text-align:center;
+  font:700 16px/1 'DM Mono', monospace;
+  letter-spacing:.04em
+}
+.calendar-time-parts span {
+  color:var(--muted);
+  font:700 12px/1 'DM Mono', monospace
+}
+.calendar-time-help {
+  margin-top:8px
+}
 label {
   display:block;
   color:var(--muted);
@@ -689,10 +763,21 @@ pre {
   justify-content:flex-end;
   gap:8px
 }
+.modal-error {
+  margin:12px 0 0;
+  padding:10px 12px;
+  border:1px solid rgba(255, 145, 124, .42);
+  border-radius:var(--button-radius, 14px);
+  background:rgba(255, 110, 85, .13);
+  color:#ffd4cb;
+  font-size:12px;
+  line-height:1.45
+}
 #toast {
   position:fixed;
   bottom:20px;
   left:50%;
+  z-index:99999;
   translate:-50% 20px;
   background:#f5ece7;
   color:#30201b;

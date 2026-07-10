@@ -196,3 +196,37 @@
     color: var(--muted);
     font: 10px/1.4 'DM Mono';
 }
+
+@media (max-width:620px) {
+    .spotify-now-v2 {
+        grid-template-columns:68px minmax(0, 1fr) 40px;
+        gap:13px;
+        padding:2px 16px 15px
+    }
+    .spotify-art,
+    .spotify-art.large {
+        flex-basis:68px;
+        width:68px;
+        height:68px
+    }
+    .spotify-art img,
+    .spotify-art .album,
+    .spotify-vinyl,
+    .spotify-art.large img,
+    .spotify-art.large .album,
+    .spotify-art.large .spotify-vinyl {
+        width:58px;
+        height:58px
+    }
+    .spotify-vinyl,
+    .spotify-art.large .spotify-vinyl {
+        top:5px;
+        transform:translateX(10px)
+    }
+    .spotify-now-copy strong {
+        font-size:15px
+    }
+    .spotify-stat-list {
+        max-height:230px
+    }
+}

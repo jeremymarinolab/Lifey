@@ -20,6 +20,8 @@ from location_service import distance_meters, parse_stamp, period_bounds, place_
 MOBILE_LOCATIONS = Path.home() / "Library" / "Application Support" / "Lifey" / "location-samples.json"
 SSL_CONTEXT = ssl.create_default_context(cafile="/etc/ssl/cert.pem")
 LAST_NOMINATIM_REQUEST = 0.0
+MOBILE_SAMPLE_MAX_AGE = dt.timedelta(days=30)
+MOBILE_SAMPLE_FUTURE_SKEW = dt.timedelta(minutes=10)
 
 
 def mobile_location_samples() -> list[dict]:
@@ -65,39 +67,50 @@ def save_mobile_location_samples(samples: list[dict]) -> None:
     MOBILE_LOCATIONS.write_text(json.dumps(samples, indent=2))
 
 
-def location_collector_token() -> str:
+def location_collector_token(*, rotate: bool = False) -> str:
     token = config().get("lifeyLocationToken", "")
-    if token:
+    if token and not rotate:
         return token
     token = secrets.token_urlsafe(32)
-    save_config({"lifeyLocationToken": token})
+    save_config({"lifeyLocationToken": token, "lifeyLocationTokenCreatedAt": dt.datetime.now(dt.timezone.utc).isoformat()})
     return token
 
 
-def add_mobile_location_samples(samples: list[dict]) -> tuple[int, int]:
+def add_mobile_location_samples(samples: list[dict]) -> dict:
     """Validate/deduplicate an idempotent batch sent by the iOS collector."""
     existing = mobile_location_samples()
     known = {str(item.get("id", "")) for item in existing}
-    added = 0
+    added = duplicates = rejected = replayed = 0
+    now = dt.datetime.now(dt.timezone.utc)
     for sample in samples[:250]:
         try:
             sample_id = str(sample["id"]).strip()
             latitude, longitude = float(sample["latitude"]), float(sample["longitude"])
             captured_at = parse_stamp(sample.get("capturedAt"))
         except (KeyError, TypeError, ValueError):
+            rejected += 1
             continue
-        if not captured_at or not sample_id or sample_id in known or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+        if not captured_at or not sample_id or not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            rejected += 1
             continue
+        captured_at = captured_at.astimezone(dt.timezone.utc)
+        if captured_at < now - MOBILE_SAMPLE_MAX_AGE or captured_at > now + MOBILE_SAMPLE_FUTURE_SKEW:
+            replayed += 1
+            continue
+        if sample_id in known:
+            duplicates += 1
+            continue
+        accuracy = sample.get("accuracyMeters", sample.get("accuracy", 0))
         existing.append({
             "id": sample_id[:100], "latitude": latitude, "longitude": longitude,
             "capturedAt": captured_at.astimezone().isoformat(),
-            "accuracyMeters": max(0, min(float(sample.get("accuracyMeters", 0)), 50_000)),
+            "accuracyMeters": max(0, min(float(accuracy), 50_000)),
             "source": "Lifey Location",
         })
         known.add(sample_id); added += 1
     existing.sort(key=lambda item: item.get("capturedAt", ""))
     save_mobile_location_samples(existing[-200_000:])
-    return added, len(existing)
+    return {"accepted": added, "duplicates": duplicates, "replayed": replayed, "rejected": rejected, "stored": len(existing)}
 
 
 def traccar_request(path: str, token: str, server: str) -> dict:

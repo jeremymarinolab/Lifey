@@ -59,6 +59,15 @@ export function handlePreferenceAction(action, button, ctx) {
 }
 
 export function handlePreferenceChange(event, ctx) {
+  const taskDisplay = event.target.dataset.taskDisplay;
+  if (taskDisplay) {
+    event.stopPropagation?.();
+    event.stopImmediatePropagation?.();
+    ctx.state.taskDisplay[taskDisplay] = event.target.checked;
+    ctx.persist();
+    ctx.updateTaskPathVisibility?.();
+    return true;
+  }
   const color = event.target.dataset.appearance;
   if (color) { ctx.state.appearance[color] = event.target.value; ctx.applyAppearance(); ctx.persist(); const preview = event.target.parentElement.querySelector('span'); if (preview) preview.style.background = event.target.value; return true; }
   if (event.target.id === 'background-tint-intensity') { ctx.state.appearance.backgroundTintIntensity = Number(event.target.value); ctx.applyAppearance(); ctx.persist(); return true; }
@@ -78,8 +87,6 @@ export function handlePreferenceChange(event, ctx) {
   if (visibility) { const scrollTop = ctx.preferencesScrollTop(); ctx.state.visibility[visibility] = event.target.checked; ctx.persist(); ctx.rerenderPreferences('appearance', scrollTop); return true; }
   const heroMetric = event.target.dataset.heroMetricVisible;
   if (heroMetric) { const scrollTop = ctx.preferencesScrollTop(); ctx.state.heroMetricVisibility[heroMetric] = event.target.checked; ctx.persist(); ctx.rerenderPreferences('appearance', scrollTop); return true; }
-  const taskDisplay = event.target.dataset.taskDisplay;
-  if (taskDisplay) { const scrollTop = ctx.preferencesScrollTop(); ctx.state.taskDisplay[taskDisplay] = event.target.checked; ctx.persist(); ctx.rerenderPreferences('appearance', scrollTop); return true; }
   return false;
 }
 
