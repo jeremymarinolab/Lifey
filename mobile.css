@@ -223,6 +223,21 @@
     margin-right:0
   }
 
+  .calendar>footer {
+    justify-content:space-between;
+    flex-wrap:nowrap
+  }
+
+  .calendar>footer .text-button.calendar-open-today {
+    margin-left:auto;
+    white-space:nowrap
+  }
+
+  .calendar>footer .calendar-open-today .action-arrow {
+    width:auto;
+    padding-top:0
+  }
+
   .panel>footer span {
     width:100%;
     padding-top:2px;
