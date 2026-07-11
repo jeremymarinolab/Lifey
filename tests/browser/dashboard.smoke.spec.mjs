@@ -35,6 +35,7 @@ test('dashboard boots and renders primary cards', async ({ page }) => {
   await expect(page.getByRole('heading', { name: /Today.s tasks/ })).toBeVisible();
   await expect(page.locator('[data-card-key="tasks"] > header')).toBeVisible();
   await expect(page.locator('[data-card-key="projects"] [data-ui="empty-state"]')).toContainText('No project-tagged tasks');
+  await expect(page.locator('[data-card-key="calendar"]').getByRole('button', { name: /Create event/ })).toHaveCount(0);
 
   expect(failures()).toEqual([]);
 });
