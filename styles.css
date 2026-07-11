@@ -130,6 +130,18 @@ nav {
   border-color:var(--button-danger-border);
   color:var(--button-danger-fg)
 }
+.quick-action {
+  gap:6px
+}
+.quick-action-mobile {
+  display:none
+}
+.quick-action-icon {
+  display:inline-grid;
+  place-items:center;
+  font-size:18px;
+  line-height:1
+}
 .settings {
   display:flex;
   align-items:center;

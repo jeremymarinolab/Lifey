@@ -186,6 +186,71 @@ test('calendar open today action stays on one line and right aligned on mobile',
   expect(layout.rightGap).toBe(layout.footerPaddingRight);
 });
 
+test('quick capture becomes a proportional appearance-aware floating action on narrow portrait screens', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  const quickCapture = page.locator('.quick-action-mobile[data-action="quick-add"]');
+  await expect(quickCapture).toHaveAttribute('aria-label', 'Quick capture');
+
+  const mobileLayout = await quickCapture.evaluate(element => {
+    const style = getComputedStyle(element);
+    const iconStyle = getComputedStyle(element.querySelector('.quick-action-icon'));
+    const labelStyle = getComputedStyle(element.querySelector('.quick-action-label'));
+    const quickActionRadius = Number(getComputedStyle(document.documentElement).getPropertyValue('--quick-action-radius').replace('px', ''));
+    const rect = element.getBoundingClientRect();
+    return {
+      position: style.position,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      radius: Math.round(Number(style.borderTopLeftRadius.replace('px', ''))),
+      expectedRadius: quickActionRadius,
+      iconColor: iconStyle.color,
+      iconSize: Math.round(Number(iconStyle.fontSize.replace('px', ''))),
+      labelDisplay: labelStyle.display,
+      rightGap: Math.round(document.documentElement.clientWidth - rect.right),
+      bottomGap: Math.round(document.documentElement.clientHeight - rect.bottom),
+    };
+  });
+
+  expect(mobileLayout).toEqual({
+    position: 'fixed',
+    width: 60,
+    height: 60,
+    radius: mobileLayout.expectedRadius,
+    expectedRadius: mobileLayout.expectedRadius,
+    iconColor: 'rgb(255, 255, 255)',
+    iconSize: 39,
+    labelDisplay: 'none',
+    rightGap: 18,
+    bottomGap: 18,
+  });
+
+  await quickCapture.click();
+  await expect(page.locator('dialog[open] .capture-raycast')).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(page.locator('dialog[open] .capture-raycast')).toHaveCount(0);
+
+  await page.setViewportSize({ width: 700, height: 1000 });
+  const narrowDesktopLayout = await quickCapture.evaluate(element => {
+    const style = getComputedStyle(element);
+    const labelStyle = getComputedStyle(element.querySelector('.quick-action-label'));
+    const rect = element.getBoundingClientRect();
+    return {
+      position: style.position,
+      width: Math.round(rect.width),
+      height: Math.round(rect.height),
+      labelDisplay: labelStyle.display,
+      rightGap: Math.round(document.documentElement.clientWidth - rect.right),
+      bottomGap: Math.round(document.documentElement.clientHeight - rect.bottom),
+    };
+  });
+
+  expect({ ...narrowDesktopLayout, bottomGap: 18 }).toEqual({ position: 'fixed', width: 60, height: 60, labelDisplay: 'none', rightGap: 18, bottomGap: 18 });
+  expect(narrowDesktopLayout.bottomGap).toBeGreaterThanOrEqual(18);
+  expect(narrowDesktopLayout.bottomGap).toBeLessThanOrEqual(19);
+});
+
 test('service worker registers for the app shell', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.shell')).toBeVisible();
