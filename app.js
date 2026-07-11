@@ -150,6 +150,7 @@ function applyAppearance() {
   document.documentElement.style.setProperty('--ui-radius', `${state.appearance.cornerRadius}px`);
   document.documentElement.style.setProperty('--card-radius', `${state.appearance.cornerRadius}px`);
   document.documentElement.style.setProperty('--button-radius', `${Math.max(8, Math.round(state.appearance.cornerRadius * .68))}px`);
+  document.documentElement.style.setProperty('--quick-action-radius', `${Math.min(30, state.appearance.cornerRadius)}px`);
   document.documentElement.style.setProperty('--dashboard-image', state.appearance.backgroundImage ? `url("${state.appearance.backgroundImage}")` : 'none');
   document.documentElement.style.setProperty('--dashboard-tint-rgb', hexToRgb(state.appearance.backgroundTint || '#15221f'));
   const tintOpacity = Number(state.appearance.backgroundTintIntensity ?? 72) / 100;
@@ -365,7 +366,8 @@ function renderDashboardShell() {
   if (!app.querySelector('.shell') || !app.querySelector('#dashboard-stats') || !app.querySelector('#dashboard-grid')) {
     app.innerHTML = `
   <div class="shell">
-    <nav><a class="brand" href="#top" aria-label="Lifey home"><span class="brand-mark">L.</span><span class="brand-name">Lifey</span></a><div class="nav-actions"><button class="button ghost archive-action" data-action="archive"><span class="action-arrow">↗</span>Update daily archive</button><button class="button quick-action" data-action="quick-add">＋ <span>Quick capture</span></button><button class="settings" data-action="settings" title="Settings (⌘ .)" aria-label="Settings, shortcut Command period">⚙<kbd>⌘ .</kbd></button></div></nav>
+    <nav><a class="brand" href="#top" aria-label="Lifey home"><span class="brand-mark">L.</span><span class="brand-name">Lifey</span></a><div class="nav-actions"><button class="button ghost archive-action" data-action="archive"><span class="action-arrow">↗</span>Update daily archive</button><button class="button quick-action quick-action-desktop" data-action="quick-add" aria-label="Quick capture"><span class="quick-action-icon" aria-hidden="true">+</span><span class="quick-action-label">Quick capture</span></button><button class="settings" data-action="settings" title="Settings (⌘ .)" aria-label="Settings, shortcut Command period">⚙<kbd>⌘ .</kbd></button></div></nav>
+    <button class="button quick-action quick-action-mobile" data-action="quick-add" aria-label="Quick capture"><span class="quick-action-icon" aria-hidden="true">+</span><span class="quick-action-label">Quick capture</span></button>
     <section class="hero" id="top"><h1 class="date-title"></h1></section>
     <div id="dashboard-stats"></div>
     <div class="grid" id="dashboard-grid"></div>
