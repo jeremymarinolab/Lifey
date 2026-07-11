@@ -943,7 +943,7 @@ function render() {
       title: 'Day in motion',
       status: badge(calendarStatusLabel, state.google.connected ? 'exact' : 'estimated'),
       body: `${allDayEvents.length ? `<div class="all-day-events">${allDayEvents.map(e => `<div class="all-day-event"><span>All day</span><strong>${escape(e.title)}</strong>${e.id ? iconButton('×', { className: 'event-delete', title: 'Delete Calendar event', ariaLabel: `Delete ${e.title}`, action: 'delete-calendar-event', attrs: { 'data-event-id': e.id } }) : ''}</div>`).join('')}</div>` : ''}${renderCalendarTimeline(timedCalendarEvents, calendarScale, calendarEmptyMessage(state.google.connected))}`,
-      footer: `${button(calendarButtonLabel, { className: 'text-button', action: 'connect-google' })}${button('<span class="action-arrow">↗</span>Open today', { className: 'text-button', action: 'open-google-calendar' })}${button('＋ Create event', { className: 'text-button', action: 'create-event' })}`
+      footer: `${button(calendarButtonLabel, { className: 'text-button', action: 'connect-google' })}${button('<span class="action-arrow">↗</span>Open today', { className: 'text-button', action: 'open-google-calendar' })}`
     }),
     panelCard({
       key: 'youtube',
@@ -1179,10 +1179,6 @@ const actionHandlers = {
     const date = window.pendingCalendarDate || todayIso();
     document.querySelector('#modal').close();
     createGoogleCalendarEvent(task, time, date).catch(error => toast(error.message));
-  },
-  'create-event': () => {
-    const task = state.tasks.find(item => !item.calendar && !item.done);
-    if (task) scheduleTaskFromMetadata(task).catch(error => toast(error.message));
   },
   'open-google-calendar': () => window.open(`https://calendar.google.com/calendar/u/0/r/day/${todayIso().replaceAll('-', '/')}`, '_blank', 'noopener'),
   'open-suggestion': ({ button }) => button.dataset.url ? window.open(button.dataset.url, '_blank', 'noopener') : toast('This suggestion does not have a direct source link yet.'),
