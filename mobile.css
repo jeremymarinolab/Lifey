@@ -311,31 +311,65 @@
     width:60px;
     height:60px;
     padding:0;
-    border:1px solid rgba(255, 255, 255, .34);
+    border:0;
     border-radius:var(--quick-action-radius, 24px);
-    background:linear-gradient(145deg, color-mix(in srgb, var(--accent) 78%, #fff 22%), var(--accent) 52%, color-mix(in srgb, var(--accent) 82%, #6f2418 18%));
-    box-shadow:inset 0 2px 0 rgba(255, 255, 255, .34), inset 0 -4px 8px rgba(83, 27, 19, .2), 0 18px 38px rgba(29, 18, 14, .34);
+    background:linear-gradient(145deg, rgba(255, 255, 255, .18), rgba(255, 255, 255, .04) 46%, rgba(62, 18, 10, .08)), var(--accent);
+    box-shadow:none;
+    filter:none;
+    transform-origin:center;
+    transition:transform .18s cubic-bezier(.2, .8, .2, 1);
     touch-action:manipulation;
     -webkit-tap-highlight-color:transparent
   }
 
   .quick-action-mobile .quick-action-icon {
-    display:grid;
-    place-items:center;
-    color:#fff;
-    font:600 39px/1 'DM Sans';
-    letter-spacing:-.08em;
-    transform:translateY(-1px);
-    text-shadow:0 1px 0 rgba(79, 24, 16, .46), 0 4px 8px rgba(70, 20, 13, .3)
+    position:relative;
+    display:block;
+    width:28px;
+    height:28px;
+    overflow:hidden;
+    color:transparent;
+    font-size:0;
+    text-shadow:none
+  }
+
+  .quick-action-mobile .quick-action-icon::before,
+  .quick-action-mobile .quick-action-icon::after {
+    content:'';
+    position:absolute;
+    top:50%;
+    left:50%;
+    border-radius:999px;
+    background:#fff;
+    transform:translate(-50%, -50%)
+  }
+
+  .quick-action-mobile .quick-action-icon::before {
+    width:26px;
+    height:3px
+  }
+
+  .quick-action-mobile .quick-action-icon::after {
+    width:3px;
+    height:26px
   }
 
   .quick-action-mobile .quick-action-label {
     display:none
   }
 
+  .quick-action-mobile:hover {
+    filter:none;
+    transform:scale(1.045)
+  }
+
   .quick-action-mobile:active {
-    transform:translateY(1px) scale(.97);
-    box-shadow:inset 0 1px 0 rgba(255, 255, 255, .25), inset 0 -2px 5px rgba(83, 27, 19, .24), 0 11px 24px rgba(29, 18, 14, .3)
+    transform:scale(1.02)
+  }
+
+  .quick-action-mobile:focus-visible {
+    outline:2px solid rgba(255, 255, 255, .78);
+    outline-offset:3px
   }
 }
 
