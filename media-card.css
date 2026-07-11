@@ -187,9 +187,6 @@
 }
 
 @media (max-width:620px) {
-    .activity-stack {
-        gap:14px
-    }
     .compact .track {
         padding:2px 16px 15px
     }

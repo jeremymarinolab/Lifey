@@ -120,10 +120,6 @@
     display: block;
     margin-top: 2px;
 }
-.project-card-add {
-    justify-self: start;
-    min-height: 32px;
-}
 .project-detail {
     display: grid;
     gap: 14px;

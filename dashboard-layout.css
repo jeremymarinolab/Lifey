@@ -164,10 +164,10 @@ nav::before {
     padding-top: 42px;
 }
 /* Appearance-controlled shape system. */
-.panel, .ask, .archive-note, .profile-exclusions, .profile-summary, .project-card, .week-top-places, .week-days, .habit-graph, .background-image-preview, .background-image-control, .location-radius, .merge-settings, .habit-settings, .archive-settings, .profile-backup {
+.panel, .ask, .profile-exclusions, .profile-summary, .project-card, .week-top-places, .week-days, .habit-graph, .background-image-preview, .background-image-control, .location-radius, .merge-settings, .habit-settings, .archive-settings, .profile-backup {
     border-radius: var(--card-radius, var(--radius-xl));
 }
-.button, .settings, .icon-button, .text-button, .integration-row, .archive-preference, .preferences-tab, .preference-toggle i, input, textarea, select, .badge, .segmented-control, .segmented-control button, .segmented-filter, .segmented-filter button, .hero-metric-item, .card-order-item, .event div, .all-day-event, .track, .artists, .suggestion-list .save, .place-select, .capture-command, .capture-pill, .capture-add, .capture-preview, .capture-calendar, .capture-clock, .capture-place-dropdown {
+.button, .settings, .icon-button, .text-button, .integration-row, .preferences-tab, .preference-toggle i, input, textarea, select, .badge, .segmented-control, .segmented-control button, .segmented-filter, .segmented-filter button, .hero-metric-item, .card-order-item, .event div, .all-day-event, .track, .artists, .suggestion-list .save, .place-select, .capture-command, .capture-pill, .capture-add, .capture-preview, .capture-calendar, .capture-clock, .capture-place-dropdown {
     border-radius: var(--button-radius, var(--radius-md));
 }
 .check, .color-preference span, .preference-toggle i::after, .habit-month-grid span {

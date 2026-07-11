@@ -367,7 +367,7 @@ function renderDashboardShell() {
     app.innerHTML = `
   <div class="shell">
     <nav><a class="brand" href="#top" aria-label="Lifey home"><span class="brand-mark">L.</span><span class="brand-name">Lifey</span></a><div class="nav-actions"><button class="button ghost archive-action" data-action="archive"><span class="action-arrow">↗</span>Update daily archive</button><button class="button quick-action quick-action-desktop" data-action="quick-add" aria-label="Quick capture"><span class="quick-action-icon" aria-hidden="true">+</span><span class="quick-action-label">Quick capture</span></button><button class="settings" data-action="settings" title="Settings (⌘ .)" aria-label="Settings, shortcut Command period">⚙<kbd>⌘ .</kbd></button></div></nav>
-    <button class="button quick-action quick-action-mobile" data-action="quick-add" aria-label="Quick capture"><span class="quick-action-icon" aria-hidden="true">+</span><span class="quick-action-label">Quick capture</span></button>
+    <button class="button quick-action quick-action-mobile" data-action="quick-add" aria-label="Quick capture"><span class="quick-action-icon" aria-hidden="true"></span></button>
     <section class="hero" id="top"><h1 class="date-title"></h1></section>
     <div id="dashboard-stats"></div>
     <div class="grid" id="dashboard-grid"></div>

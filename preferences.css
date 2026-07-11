@@ -93,7 +93,7 @@ dialog:has(.preferences) {
   display:grid;
   gap:9px
 }
-.integration-row, .archive-preference {
+.integration-row {
   display:flex;
   align-items:center;
   width:100%;
@@ -106,7 +106,7 @@ dialog:has(.preferences) {
   text-align:left;
   cursor:pointer
 }
-.integration-row:hover, .archive-preference:hover {
+.integration-row:hover {
   background:rgba(235, 250, 241, .11)
 }
 .integration-logo {
@@ -131,16 +131,10 @@ dialog:has(.preferences) {
   font:11px 'DM Mono';
   color:var(--muted)
 }
-.integration-row i, .archive-preference span {
+.integration-row i {
   font-style:normal;
   color:var(--muted);
   font-size:21px
-}
-.archive-preference {
-  justify-content:space-between;
-  margin-top:20px;
-  padding:14px 15px;
-  font-weight:600
 }
 .appearance-swatches {
   display:flex;
@@ -600,8 +594,7 @@ nav {
   .preferences-head h2 {
     font-size:29px
   }
-  .integration-row,
-  .archive-preference {
+  .integration-row {
     min-height:62px;
     padding:13px;
     border-radius:16px
