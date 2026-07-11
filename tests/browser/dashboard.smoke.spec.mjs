@@ -195,7 +195,10 @@ test('quick capture becomes a proportional appearance-aware floating action on n
 
   const mobileLayout = await quickCapture.evaluate(element => {
     const style = getComputedStyle(element);
-    const iconStyle = getComputedStyle(element.querySelector('.quick-action-icon'));
+    const icon = element.querySelector('.quick-action-icon');
+    const iconRect = icon.getBoundingClientRect();
+    const horizontalBar = getComputedStyle(icon, '::before');
+    const verticalBar = getComputedStyle(icon, '::after');
     const labelStyle = getComputedStyle(element.querySelector('.quick-action-label'));
     const quickActionRadius = Number(getComputedStyle(document.documentElement).getPropertyValue('--quick-action-radius').replace('px', ''));
     const rect = element.getBoundingClientRect();
@@ -205,8 +208,12 @@ test('quick capture becomes a proportional appearance-aware floating action on n
       height: Math.round(rect.height),
       radius: Math.round(Number(style.borderTopLeftRadius.replace('px', ''))),
       expectedRadius: quickActionRadius,
-      iconColor: iconStyle.color,
-      iconSize: Math.round(Number(iconStyle.fontSize.replace('px', ''))),
+      borderWidth: style.borderTopWidth,
+      shadow: style.boxShadow,
+      transitionProperty: style.transitionProperty,
+      iconCentered: Math.abs((rect.left + rect.width / 2) - (iconRect.left + iconRect.width / 2)) < .5 && Math.abs((rect.top + rect.height / 2) - (iconRect.top + iconRect.height / 2)) < .5,
+      horizontalBar: [horizontalBar.width, horizontalBar.height, horizontalBar.backgroundColor],
+      verticalBar: [verticalBar.width, verticalBar.height, verticalBar.backgroundColor],
       labelDisplay: labelStyle.display,
       rightGap: Math.round(document.documentElement.clientWidth - rect.right),
       bottomGap: Math.round(document.documentElement.clientHeight - rect.bottom),
@@ -219,17 +226,32 @@ test('quick capture becomes a proportional appearance-aware floating action on n
     height: 60,
     radius: mobileLayout.expectedRadius,
     expectedRadius: mobileLayout.expectedRadius,
-    iconColor: 'rgb(255, 255, 255)',
-    iconSize: 39,
+    borderWidth: '0px',
+    shadow: 'none',
+    transitionProperty: 'transform',
+    iconCentered: true,
+    horizontalBar: ['26px', '3px', 'rgb(255, 255, 255)'],
+    verticalBar: ['3px', '26px', 'rgb(255, 255, 255)'],
     labelDisplay: 'none',
     rightGap: 18,
     bottomGap: 18,
   });
 
+  await quickCapture.hover();
+  await page.waitForTimeout(220);
+  const hoverLayout = await quickCapture.evaluate(element => {
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return { width: Math.round(rect.width), height: Math.round(rect.height), filter: style.filter, shadow: style.boxShadow };
+  });
+  expect(hoverLayout).toEqual({ width: 63, height: 63, filter: 'none', shadow: 'none' });
+
   await quickCapture.click();
   await expect(page.locator('dialog[open] .capture-raycast')).toBeVisible();
   await page.keyboard.press('Escape');
   await expect(page.locator('dialog[open] .capture-raycast')).toHaveCount(0);
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(220);
 
   await page.setViewportSize({ width: 700, height: 1000 });
   const narrowDesktopLayout = await quickCapture.evaluate(element => {
