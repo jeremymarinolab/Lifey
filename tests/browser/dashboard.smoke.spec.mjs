@@ -155,6 +155,37 @@ test('show note path visible switch remains usable in mobile settings', async ({
   expect(failures()).toEqual([]);
 });
 
+test('calendar open today action stays on one line and right aligned on mobile', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/');
+
+  const footer = page.locator('[data-card-key="calendar"] > footer');
+  const verifyButton = footer.locator('[data-action="connect-google"]');
+  const openTodayButton = footer.locator('[data-action="open-google-calendar"]');
+  await expect(openTodayButton).toBeVisible();
+
+  const layout = await footer.evaluate(element => {
+    const verify = element.querySelector('[data-action="connect-google"]');
+    const openToday = element.querySelector('[data-action="open-google-calendar"]');
+    const footerRect = element.getBoundingClientRect();
+    const openRect = openToday.getBoundingClientRect();
+    const verifyStyle = getComputedStyle(verify);
+    const openStyle = getComputedStyle(openToday);
+    return {
+      rightGap: Math.round(footerRect.right - openRect.right),
+      footerPaddingRight: Math.round(parseFloat(getComputedStyle(element).paddingRight)),
+      whiteSpace: openStyle.whiteSpace,
+      fitsOneLine: openToday.scrollWidth <= openToday.clientWidth,
+      equalHorizontalPadding: verifyStyle.paddingLeft === openStyle.paddingLeft && verifyStyle.paddingRight === openStyle.paddingRight,
+    };
+  });
+
+  expect(layout.whiteSpace).toBe('nowrap');
+  expect(layout.fitsOneLine).toBe(true);
+  expect(layout.equalHorizontalPadding).toBe(true);
+  expect(layout.rightGap).toBe(layout.footerPaddingRight);
+});
+
 test('service worker registers for the app shell', async ({ page }) => {
   await page.goto('/');
   await expect(page.locator('.shell')).toBeVisible();
