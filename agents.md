@@ -62,7 +62,7 @@ Use `README.md` for the full architecture map. Practical routing:
 - Pure parsing logic: `js/parsers.js`
 - Feature rendering/controllers: `js/features/*`
 - Reusable UI helpers: `js/ui/*`
-- Spotify frontend integration: `js/integrations/spotify.js`
+- Spotify OAuth, Keychain tokens, and shared history: `spotify_service.py`; card rendering: `js/features/media/render.js`
 - Backend route table/validation: `routes.py`
 - HTTP server/static serving: `local_server.py`
 - Obsidian filesystem behavior: `obsidian_repo.py`

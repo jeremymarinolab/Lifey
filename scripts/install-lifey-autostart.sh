@@ -14,6 +14,7 @@ mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs/Lifey"
 sed \
   -e "s#__LIFEY_START_SCRIPT__#$ROOT/start-lifey.sh#g" \
   -e "s#__LIFEY_PROJECT_ROOT__#$PROJECT_ROOT#g" \
+  -e "s#__LIFEY_LOG_DIR__#$HOME/Library/Logs/Lifey#g" \
   "$ROOT/$LABEL.plist" > "$TARGET"
 /bin/launchctl bootout "$DOMAIN" "$LEGACY_TARGET" >/dev/null 2>&1 || true
 rm -f "$LEGACY_TARGET"

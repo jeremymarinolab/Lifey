@@ -13,7 +13,6 @@ import { handlePreferenceAction, handlePreferenceChange, handlePreferenceInput }
 import { handleProjectAction } from './js/features/projects/controller.js';
 import { hoursLabel, renderProjectCard } from './js/features/projects/render.js';
 import { renderTaskCard, tasksForCurrentPlace } from './js/features/tasks/render.js';
-import { spotifyStats, spotifyTrackFromItem } from './js/integrations/spotify.js';
 import { parseTasks } from './js/parsers.js';
 import { badge, escape, stat } from './js/renderers.js';
 import { loadStoredState, normalizeDailyNoteResponse, normalizeGmailSuggestionsResponse, normalizeGoogleCalendarResponse, normalizeHabitHistoryResponse, normalizeHabitsTodayResponse, normalizeLocationResponse, normalizeLocationSettingsResponse, normalizePlaceLabelsResponse, normalizeProfileResponse, normalizeProjectsResponse, normalizeYoutubeActivityResponse, saveStoredState } from './js/state.js';
@@ -67,17 +66,18 @@ state.integrations ||= { notion: {}, google: {}, spotify: {}, gmail: {} };
 if (state.integrations.google?.clientSecret) delete state.integrations.google.clientSecret;
 state.spotify ||= {};
 state.spotify = {
-  connected: Boolean(state.spotify.accessToken || state.spotify.connected),
-  accessToken: state.spotify.accessToken || '',
-  refreshToken: state.spotify.refreshToken || '',
-  profile: state.spotify.profile || null,
+  connected: false,
+  configured: Boolean(state.integrations.spotify?.clientId),
+  account: '',
   current: state.spotify.current || null,
   history: Array.isArray(state.spotify.history) ? state.spotify.history : [],
+  stats: { songs: [], artists: [], playCount: 0, minutes: 0 },
   view: SPOTIFY_VIEW_OPTIONS.some(([view]) => view === state.spotify.view) ? state.spotify.view : 'artists',
   range: SPOTIFY_RANGE_OPTIONS.some(([range]) => range === state.spotify.range) ? state.spotify.range : 'today',
-  minutes: Number(state.spotify.minutes || 0),
-  errors: [],
-  lastSync: state.spotify.lastSync || ''
+  todayMinutes: 0,
+  lastSync: '',
+  error: '',
+  errorKind: ''
 };
 state.google ||= { authorized: false, connected: false, events: [] };
 if (!state.google.tokenExpiresAt || state.google.tokenExpiresAt <= Date.now()) {
@@ -536,158 +536,71 @@ async function connectGmail() {
   if (status.connected) return loadGmail();
   window.location.assign('/api/google/auth/start');
 }
-function base64url(bytes) { return btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); }
-async function spotifyChallenge(verifier) { return base64url(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))); }
-function spotifyHeaders() { return { Authorization: `Bearer ${state.spotify.accessToken || ''}` }; }
-async function spotifyApi(path) {
-  const res = await fetch(`https://api.spotify.com/v1${path}`, { headers: spotifyHeaders(), cache: 'no-store' });
-  if (res.status === 401) {
-    state.spotify.connected = false;
-    state.spotify.errors = ['Spotify session expired. Reconnect Spotify.'];
-    persist();
+async function migrateSpotifyHistory() {
+  const plays = (state.spotify.history || []).filter(play => play?.source === 'recently-played' || play?.source === 'spotify' || play?.source === 'imported');
+  if (!plays.length) { state.spotify.history = []; return; }
+  for (let index = 0; index < plays.length; index += 100) {
+    await localRequest('/api/spotify/history/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ plays: plays.slice(index, index + 100) }) });
+  }
+  state.spotify.history = [];
+  saveStoredState(state);
+}
+let spotifyLoading;
+async function loadSpotify(options = {}) {
+  if (spotifyLoading) {
+    await spotifyLoading;
+    if (state.spotify.loadedRange === state.spotify.range) return;
+  }
+  const requestedRange = state.spotify.range;
+  spotifyLoading = (async () => {
+    await migrateSpotifyHistory();
+    const params = new URLSearchParams({ range: requestedRange, active: document.visibilityState === 'visible' ? '1' : '0' });
+    const data = await localRequest(`/api/spotify/summary?${params}`);
+    if (state.spotify.range !== requestedRange) return;
+    state.spotify = { ...state.spotify, ...data };
+    state.spotify.loadedRange = requestedRange;
+    if (data.clientId) state.integrations.spotify = { clientId: data.clientId };
     render();
-    throw new Error('Spotify session expired. Reconnect Spotify.');
-  }
-  if (!res.ok) {
-    let detail = '';
-    try { const body = await res.json(); detail = body?.error?.message || body?.error_description || ''; } catch {}
-    const error = new Error(`Spotify request failed (${res.status})${detail ? `: ${detail}` : ''}`);
-    error.status = res.status;
-    throw error;
-  }
-  return res.status === 204 ? null : res.json();
+    if (data.currentRefreshing && !window.spotifyPendingRefreshTimer) {
+      window.spotifyPendingRefreshTimer = setTimeout(() => {
+        window.spotifyPendingRefreshTimer = null;
+        loadSpotify({ quiet: true }).catch(() => {});
+      }, 3000);
+    }
+    if (!options.quiet) toast('Spotify refreshed.');
+  })();
+  try { return await spotifyLoading; } finally { spotifyLoading = null; }
 }
-async function spotifyMaybe(label, path) { try { return { label, data: await spotifyApi(path) }; } catch (error) { return { label, error: error.message, status: error.status || 0 }; } }
-async function spotifyDebugFetch(label, path) {
-  if (!state.spotify.accessToken) return { label, status: 'missing token', summary: 'No Spotify access token is saved in this browser.' };
-  try {
-    const response = await fetch(`https://api.spotify.com/v1${path}`, { headers: spotifyHeaders(), cache: 'no-store' });
-    const text = response.status === 204 ? '' : await response.text();
-    let body = null;
-    try { body = text ? JSON.parse(text) : null; } catch { body = text; }
-    const item = body?.item || body?.items?.[0]?.track || null;
-    const errorSummary = typeof body?.error === 'string'
-      ? `${body.error}${body.error_description ? `: ${body.error_description}` : ''}`
-      : body?.error?.message || body?.error_description || body?.message || '';
-    return {
-      label,
-      status: response.status,
-      ok: response.ok,
-      summary: item ? `${item.name || 'Untitled'} — ${(item.artists || []).map(artist => artist.name).join(', ') || 'unknown artist'}` : errorSummary || (response.status === 204 ? '204 No Content' : body ? 'Response received, but no track item found.' : 'Empty response'),
-      body
-    };
-  } catch (error) {
-    return { label, status: 'network error', ok: false, summary: error.message };
-  }
-}
-async function diagnoseSpotify() {
-  const checks = await Promise.all([
-    spotifyDebugFetch('Profile', '/me'),
-    spotifyDebugFetch('Currently playing', '/me/player/currently-playing?additional_types=track,episode'),
-    spotifyDebugFetch('Player state', '/me/player?additional_types=track,episode'),
-    spotifyDebugFetch('Recently played', '/me/player/recently-played?limit=5')
-  ]);
-  const rows = checks.map(check => `<div class="spotify-diagnostic-row"><strong>${escape(check.label)}</strong><span>${escape(String(check.status))}</span><small>${escape(check.summary || 'No summary')}</small></div>`).join('');
-  const current = checks.find(check => check.label === 'Currently playing')?.body?.item || checks.find(check => check.label === 'Player state')?.body?.item || null;
-  if (current) {
-    state.spotify.current = spotifyCurrentFromPlayback({ item: current, is_playing: true, progress_ms: 0 });
-    state.spotify.nowStatus = 'Recovered from Spotify diagnostic.';
-    state.spotify.connected = true;
-    persist();
-    render();
-  }
-  const allForbidden = checks.every(check => Number(check.status) === 403);
-  modal('Spotify diagnostic', `<p class="modal-copy">${allForbidden ? 'Spotify is refusing this access token for every endpoint, including profile. This usually means the Spotify account is not allowed in the app dashboard/development mode, or the token was issued before the required scopes were granted.' : 'This is the raw status Lifey gets from Spotify. If current playback says <strong>403</strong>, use Reconnect. If it says <strong>204</strong>, Spotify is saying there is no active playback visible to the API.'}</p><div class="spotify-diagnostic">${rows}</div>`, 'close');
-}
-function spotifyTrimHistory() {
-  const cutoff = new Date();
-  cutoff.setMonth(cutoff.getMonth() - 4);
-  state.spotify.history = (state.spotify.history || []).filter(play => new Date(play.playedAt || 0) >= cutoff).slice(-1000);
-}
-function spotifyRemember(play) {
-  if (!play?.trackId && !play?.title) return;
-  state.spotify.history ||= [];
-  const exists = state.spotify.history.some(item => item.playId === play.playId);
-  if (!exists) state.spotify.history.push(play);
-  spotifyTrimHistory();
-}
-function spotifyCurrentFromPlayback(playback) {
-  const item = playback?.item;
-  if (!item) return null;
-  const current = spotifyTrackFromItem(item, new Date().toISOString(), 'currently-playing');
-  return { ...current, isPlaying: Boolean(playback.is_playing), progressMs: Number(playback.progress_ms || 0), capturedAt: new Date().toISOString() };
+async function syncSpotify() {
+  await localRequest('/api/spotify/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  await loadSpotify();
 }
 function startSpotifyPolling() {
   clearInterval(window.spotifyPollingTimer);
-  if (!state.spotify.accessToken) return;
   window.spotifyPollingTimer = setInterval(() => {
-    if (!state.spotify.accessToken) return;
-    loadSpotify({ quiet: true }).catch(() => {});
-  }, 30_000);
-}
-async function loadSpotify(options = {}) {
-  if (!state.spotify.accessToken) { state.spotify.connected = false; state.spotify.errors = ['Connect Spotify first.']; persist(); render(); throw new Error('Connect Spotify first.'); }
-  const [profile, recent, currentlyPlaying, playerState] = await Promise.all([
-    spotifyMaybe('profile', '/me'),
-    spotifyMaybe('recently played', '/me/player/recently-played?limit=50'),
-    spotifyMaybe('currently playing', '/me/player/currently-playing?additional_types=track,episode'),
-    spotifyMaybe('player state', '/me/player?additional_types=track,episode')
-  ]);
-  if (profile.data) state.spotify.profile = { id: profile.data.id, name: profile.data.display_name || profile.data.id };
-  for (const item of recent.data?.items || []) spotifyRemember(spotifyTrackFromItem(item, item.played_at, 'recently-played'));
-  const currentSource = currentlyPlaying.data?.item ? currentlyPlaying.data : playerState.data?.item ? playerState.data : null;
-  const current = spotifyCurrentFromPlayback(currentSource);
-  if (current) {
-    state.spotify.current = current;
-    state.spotify.nowStatus = current.isPlaying ? 'Now playing from Spotify' : 'Spotify is open, but playback is paused';
-    if (current.isPlaying) {
-      const alreadyCaptured = (state.spotify.history || []).some(play => play.trackId === current.trackId && Date.now() - new Date(play.playedAt || 0).getTime() < 90_000);
-      if (!alreadyCaptured) spotifyRemember({ ...current, playedAt: current.capturedAt, playId: `${current.trackId || current.title}:live:${Math.floor(Date.now() / 90000)}` });
-    }
-  } else {
-    state.spotify.current = null;
-    const currentErrors = [currentlyPlaying, playerState].filter(result => result.error).map(result => result.error).join(' · ');
-    state.spotify.nowStatus = currentErrors
-      ? (currentErrors.includes('403') ? 'Reconnect Spotify so Lifey can read playback state.' : currentErrors)
-      : 'No active Spotify playback was found. Start Spotify on any device, then refresh.';
-  }
-  const endpointNotes = [profile, recent, currentlyPlaying, playerState].filter(result => result.error && !String(result.error).includes('session expired')).map(result => `${result.label}: ${result.error}`);
-  const stats = spotifyStats(state.spotify, state.spotify.range);
-  state.spotify.connected = Boolean(state.spotify.accessToken);
-  state.spotify.minutes = stats.minutes;
-  state.spotify.errors = [];
-  state.spotify.endpointNotes = endpointNotes;
-  state.spotify.lastSync = new Date().toISOString();
-  persist();
-  render();
-  if (!options.quiet) toast('Spotify refreshed.');
+    if (document.visibilityState === 'visible') loadSpotify({ quiet: true }).catch(() => {});
+  }, 60_000);
 }
 async function connectSpotify(forceAuthorize = false) {
-  const clientId = state.integrations.spotify?.clientId;
-  if (!clientId) { integrationForm('spotify'); return; }
-  if (state.spotify.accessToken && !forceAuthorize) {
-    try { await loadSpotify(); return; }
-    catch (error) { if (!String(error.message || '').toLowerCase().includes('expired')) throw error; }
-  }
-  const verifier = base64url(crypto.getRandomValues(new Uint8Array(64)));
-  const oauthState = base64url(crypto.getRandomValues(new Uint8Array(16)));
-  sessionStorage.setItem('spotify-pkce-verifier', verifier); sessionStorage.setItem('spotify-oauth-state', oauthState);
-  const query = new URLSearchParams({ client_id: clientId, response_type: 'code', redirect_uri: window.location.origin, code_challenge_method: 'S256', code_challenge: await spotifyChallenge(verifier), state: oauthState, scope: 'user-read-currently-playing user-read-playback-state user-read-recently-played', show_dialog: 'true' });
-  window.location.assign(`https://accounts.spotify.com/authorize?${query}`);
+  if (!state.spotify.configured) { integrationForm('spotify'); return; }
+  if (state.spotify.connected && !forceAuthorize) return syncSpotify();
+  window.location.assign('/api/spotify/auth/start');
 }
-async function reconnectSpotify() {
-  state.spotify = { ...state.spotify, accessToken: '', refreshToken: '', connected: false, errors: [] };
-  persist();
-  await connectSpotify(true);
+async function reconnectSpotify() { return connectSpotify(true); }
+async function diagnoseSpotify() {
+  const data = await localRequest('/api/spotify/summary?range=today');
+  modal('Spotify diagnostic', `<p class="modal-copy">${escape(data.error || (data.connected ? `Connected as ${data.account || 'Spotify account'}.` : 'Spotify is not connected.'))}</p><div class="spotify-diagnostic"><div class="spotify-diagnostic-row"><strong>Last successful sync</strong><span>${escape(data.lastSync ? new Date(data.lastSync).toLocaleString() : 'Never')}</span></div><div class="spotify-diagnostic-row"><strong>Oldest saved play</strong><span>${escape(data.oldestPlay ? new Date(data.oldestPlay).toLocaleString() : 'None')}</span></div><div class="spotify-diagnostic-row"><strong>Historical coverage</strong><span>${data.historyGapUnrecoverable ? 'Unrecoverable gap' : data.historyGap ? 'Recovering a gap' : data.backfillComplete ? 'Spotify API exhausted' : 'Still backfilling'}</span></div></div>`, 'close');
 }
-async function finishSpotifyAuth() {
-  const params = new URLSearchParams(window.location.search); const code = params.get('code');
-  if (!code || !params.get('state')) return;
-  if (params.get('state') !== sessionStorage.getItem('spotify-oauth-state')) throw new Error('Spotify authorization state did not match.');
-  const body = new URLSearchParams({ client_id: state.integrations.spotify?.clientId || '', grant_type: 'authorization_code', code, redirect_uri: window.location.origin, code_verifier: sessionStorage.getItem('spotify-pkce-verifier') || '' });
-  const response = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
-  if (!response.ok) throw new Error('Spotify did not return an access token.');
-  const token = await response.json(); state.spotify = { ...state.spotify, accessToken: token.access_token, refreshToken: token.refresh_token || state.spotify.refreshToken || '', connected: true, errors: [] }; persist(); sessionStorage.removeItem('spotify-pkce-verifier'); sessionStorage.removeItem('spotify-oauth-state'); history.replaceState({}, '', window.location.pathname); await loadSpotify({ quiet: true }); startSpotifyPolling(); toast('Spotify connected.');
+async function disconnectSpotify() {
+  await localRequest('/api/spotify/disconnect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  await loadSpotify({ quiet: true });
+  toast('Spotify disconnected. Saved listening history remains on this Mac.');
+}
+async function clearSpotifyHistory() {
+  await localRequest('/api/spotify/history/clear', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  closeActiveDialog();
+  await loadSpotify({ quiet: true });
+  toast('Spotify listening history cleared.');
 }
 
 function projectSlug(value) { return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''); }
@@ -854,8 +767,8 @@ function render() {
   const gmailSuggestions = state.gmail.connected ? state.gmail.messages.map(message => ({ source: `Gmail · ${message.from.split('<')[0].trim()}`, time: 'new', title: message.subject, why: message.snippet || 'Fresh message captured from your configured Gmail search.', url: `https://mail.google.com/mail/u/0/#all/${message.id}` })) : null;
   const availableSuggestions = gmailSuggestions || EMPTY_INSPIRATION_FIXTURES;
   const contentSuggestions = state.locationView === 'week' ? availableSuggestions : availableSuggestions.slice(0, state.contentDisplay.limit);
-  const currentTrack = spotify.current || null;
-  const spotifySummary = renderSpotifySummary({ spotify, spotifyStats, currentTrack });
+  const currentTrack = Date.now() - Number(spotify.currentCheckedAt || 0) < 120_000 ? spotify.current : null;
+  const spotifySummary = renderSpotifySummary({ spotify, currentTrack });
   const youtubeWeekData = youtube.week || { days: [], videos: [], totalActiveSeconds: 0 };
   const selectedYoutubeDay = youtubeWeekData.days?.find(day => day.date === state.youtubeWeekDay) || youtubeWeekData.days?.find(day => day.date === todayIso()) || youtubeWeekData.days?.at(-1);
   const youtubeActiveVideos = [...(state.youtubeView === 'week' ? (selectedYoutubeDay?.videos || []) : (youtube.videos || []))].sort((a, b) => state.contentDisplay.youtubeSort === 'time' ? String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')) || Number(b.activeSeconds || 0) - Number(a.activeSeconds || 0) : Number(b.activeSeconds || 0) - Number(a.activeSeconds || 0) || String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')));
@@ -879,7 +792,7 @@ function render() {
     habits: () => stat('Habits', `${habitCompleted}/${habitScheduled}`, 'today · Obsidian', 'yellow'),
     calendar: () => stat('Calendar', `${calendarEvents.length} events`, calendarMetricMeta, 'blue'),
     youtube: () => stat('YouTube', youtube.videos.length ? durationLabel(youtube.totalActiveSeconds) : '—', youtube.videos.length ? 'active tab time' : 'extension not connected', 'lime'),
-    spotify: () => stat('Spotify', spotify.connected ? (spotifySummary.minutes ? durationLabel(spotifySummary.minutes * 60) : 'connected') : '—', spotify.connected ? 'read-only API' : 'not connected', 'violet'),
+    spotify: () => stat('Spotify', spotifySummary.minutes ? durationLabel(spotifySummary.minutes * 60) : spotify.connected ? 'connected' : '—', spotify.error ? 'needs attention' : spotify.connected ? 'estimated listening' : 'not connected', 'violet'),
     places: () => stat('Places', `${(placeData || []).length} visited`, state.traccar.connected ? `estimated · ${totalTimeLabel(placeTotal)}` : 'location not connected', 'blue'),
     suggestions: () => stat('Inspiration', `${contentSuggestions.length} items`, state.gmail.connected ? 'Gmail · fresh' : 'starter fixtures', 'blue')
   };
@@ -969,7 +882,7 @@ function render() {
       meta: spotifySummary.meta,
       status: badge(spotifySummary.status, spotifySummary.statusKind),
       body: spotifySummary.body,
-      footer: `${button(spotify.connected ? '↻ Refresh Spotify' : 'Connect Spotify', { className: 'text-button', action: 'connect-spotify' })}${spotify.connected ? button('↗ Reconnect', { className: 'text-button', action: 'reconnect-spotify' }) : ''}${button('Diagnose', { className: 'text-button', action: 'diagnose-spotify' })}`
+      footer: `${spotify.connected ? button('↻ Refresh Spotify', { className: 'text-button', action: 'connect-spotify' }) + button('↗ Reconnect', { className: 'text-button', action: 'reconnect-spotify' }) : ''}${button('Diagnose', { className: 'text-button', action: 'diagnose-spotify' })}`
     }),
     panelCard({
       key: 'suggestions',
@@ -1105,13 +1018,13 @@ async function toggleTask(task) {
   task.done = completed; persist(); render(); toast(completed ? 'Task completed in Obsidian.' : 'Task reopened in Obsidian.');
 }
 function placeWikiLink(name) { const safe = String(name || 'Unknown place').replaceAll('"', "'").replaceAll(']]', '').trim(); return `[[Place - "${safe}"]]`; }
-function archiveMarkdown() { const places = state.traccar.connected ? state.traccar.places : state.places; const values = { date: todayJournalDatePadded(), notionTasks: state.tasks.filter(t => t.notion).length, calendarTasks: state.tasks.filter(t => t.calendar).length, youtubeTime: durationLabel(state.youtube.totalActiveSeconds || 0), spotifyTime: durationLabel((spotifyStats(state.spotify, 'today').minutes || 0) * 60), places: places.length ? places.map(p => `- ${placeWikiLink(p.name)} · ${p.time || placeTiming(p).range} (${p.source})`).join('\n') : '- No places recorded' }; return applyArchiveTitle(normaliseArchiveTemplate(state.archiveTemplate), 'daily').replace(/\{\{(\w+)\}\}/g, (match, key) => values[key] ?? match); }
+function archiveMarkdown() { const places = state.traccar.connected ? state.traccar.places : state.places; const values = { date: todayJournalDatePadded(), notionTasks: state.tasks.filter(t => t.notion).length, calendarTasks: state.tasks.filter(t => t.calendar).length, youtubeTime: durationLabel(state.youtube.totalActiveSeconds || 0), spotifyTime: durationLabel((state.spotify.todayMinutes || 0) * 60), places: places.length ? places.map(p => `- ${placeWikiLink(p.name)} · ${p.time || placeTiming(p).range} (${p.source})`).join('\n') : '- No places recorded' }; return applyArchiveTitle(normaliseArchiveTemplate(state.archiveTemplate), 'daily').replace(/\{\{(\w+)\}\}/g, (match, key) => values[key] ?? match); }
 function integrationForm(name) {
   const value = state.integrations[name] || {};
   const forms = {
     notion: `<p class="modal-copy">Create a Notion internal integration and share your task database with it. The token is saved only by the local helper, never browser storage. You may paste either a Database ID or Data Source ID.</p><label>Integration token<input id="integration-token" type="password" placeholder="ntn_…"></label><label>Database or Data Source ID<input id="integration-database" value="${escape(value.database || '')}" placeholder="Notion ID"></label><label>Title property<input id="integration-property" value="${escape(value.property || 'Name')}" placeholder="Name"></label><button class="connection" data-action="diagnose-notion">Test Notion connection <span>Read-only</span></button><button class="connection" data-action="list-notion-sources">Find accessible databases <span>Read-only</span></button>`,
     google: `<p class="modal-copy">Google Calendar and Gmail now connect through the Mac helper. Create a <strong>Desktop app</strong> OAuth client in Google Cloud, then paste its Client ID and Client Secret here. Lifey stores the refresh token in macOS Keychain.</p><p class="modal-copy">${state.google.hasClientSecret ? 'Client Secret is saved in Keychain. Leave the field blank unless you want to replace it.' : '<strong>Client Secret is not saved yet.</strong> Paste it before connecting.'}</p><label>Google Desktop OAuth client ID<input id="integration-client-id" value="${escape(value.clientId || '')}" placeholder="…apps.googleusercontent.com"></label><label>Google Desktop OAuth client secret<input id="integration-client-secret" type="password" placeholder="GOCSPX-…"></label><label>Calendar ID<input id="integration-calendar" value="${escape(value.calendar || 'primary')}" placeholder="primary"></label>`,
-    spotify: `<p class="modal-copy">Create a Spotify app and add <strong>http://127.0.0.1:4173</strong> as its redirect URI. Premium is not required. Lifey reads current playback, player state, and recent plays, then builds local listening history for Today, This week, and This month. If the current song does not appear, use Reconnect once to grant the playback-state scope.</p><label>Spotify client ID<input id="integration-client-id" value="${escape(value.clientId || '')}" placeholder="Spotify client ID"></label>`,
+    spotify: `<p class="modal-copy">The Spotify developer app owner needs Premium. Add <strong>http://127.0.0.1:4173/api/spotify/auth/callback</strong> as a redirect URI. For iPhone sign-in, also add your protected Lifey HTTPS address followed by <strong>/api/spotify/auth/callback</strong>. Other Spotify users must be on the app allowlist.</p><label>Spotify client ID<input id="integration-client-id" value="${escape(value.clientId || '')}" placeholder="Spotify client ID"></label>${state.spotify.connected ? button('Disconnect Spotify', { className: 'text-button', action: 'disconnect-spotify' }) : ''}${state.spotify.oldestPlay ? button('Clear listening history', { className: 'text-button', action: 'confirm-clear-spotify-history' }) : ''}`,
     gmail: `<p class="modal-copy">Gmail uses the Google OAuth client configured under Calendar. Save a search query for newsletters, Medium links, and reading recommendations.</p><label>Gmail search query<input id="integration-query" value="${escape(value.query || 'from:(medium.com OR substack.com) newer_than:14d')}" placeholder="Gmail search query"></label>`
   };
   modal(`${name === 'google' ? 'Google Calendar' : name[0].toUpperCase()+name.slice(1)} setup`, forms[name], `save-${name}`, { layer: document.querySelector('#modal .preferences') ? 'sub' : 'main' });
@@ -1120,6 +1033,10 @@ async function saveIntegration(name) {
   const val = id => document.querySelector(id)?.value.trim() || '';
   const googleSecret = name === 'google' ? val('#integration-client-secret') : '';
   const saved = name === 'notion' ? { token: val('#integration-token'), database: val('#integration-database'), property: val('#integration-property') } : name === 'google' ? { clientId: val('#integration-client-id'), calendar: val('#integration-calendar') } : name === 'spotify' ? { clientId: val('#integration-client-id') } : { query: val('#integration-query') };
+  if (name === 'spotify') {
+    const result = await localRequest('/api/spotify/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(saved) });
+    state.spotify.configured = result.configured;
+  }
   state.integrations[name] = saved;
   persist();
   if (['google', 'gmail'].includes(name) && state.integrations.google?.clientId) await saveGoogleHelperConfig(googleSecret);
@@ -1294,8 +1211,11 @@ const actionHandlers = {
   'connect-spotify': () => connectSpotify().catch(error => toast(error.message)),
   'reconnect-spotify': () => reconnectSpotify().catch(error => toast(error.message)),
   'diagnose-spotify': () => diagnoseSpotify().catch(error => toast(error.message)),
+  'disconnect-spotify': () => disconnectSpotify().catch(error => toast(error.message)),
+  'confirm-clear-spotify-history': () => modal('Clear Spotify history', '<p class="modal-copy">Delete the Spotify plays stored on this Mac? This cannot be undone.</p>', 'clear-spotify-history'),
+  'clear-spotify-history': () => clearSpotifyHistory().catch(error => toast(error.message)),
   'set-spotify-view': ({ button }) => { state.spotify.view = button.dataset.view === 'songs' ? 'songs' : 'artists'; persist(); render(); },
-  'set-spotify-range': ({ button }) => { state.spotify.range = SPOTIFY_RANGE_OPTIONS.some(([range]) => range === button.dataset.range) ? button.dataset.range : 'today'; state.spotify.minutes = spotifyStats(state.spotify, state.spotify.range).minutes; persist(); render(); },
+  'set-spotify-range': ({ button }) => { state.spotify.range = SPOTIFY_RANGE_OPTIONS.some(([range]) => range === button.dataset.range) ? button.dataset.range : 'today'; persist(); loadSpotify({ quiet: true }).catch(error => toast(error.message)); },
   'connect-google': () => connectGoogleCalendar().catch(error => toast(error.message)),
   'connect-gmail': () => connectGmail().catch(error => toast(error.message)),
   'toggle-habit': ({ button }) => {
@@ -1387,14 +1307,17 @@ document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); document.querySelector('[data-action="quick-add"]').click(); }
 });
 window.addEventListener('resize', () => { clearTimeout(window.cardLayoutResizeTimer); window.cardLayoutResizeTimer = setTimeout(arrangeDashboardCards, 120); });
+saveStoredState(state);
 render();
 scheduleGoogleExpiry();
-finishSpotifyAuth().catch(error => { history.replaceState({}, '', window.location.pathname); toast(error.message); });
+if (new URLSearchParams(window.location.search).get('spotify') === 'connected') {
+  history.replaceState({}, '', window.location.pathname);
+  toast('Spotify connected. Listening history is syncing.');
+}
 checkLocalHelper().then(async () => { const [notion, googlePlaces, osmPlaces, mobileLocation, googleStatus, placeLabels] = await Promise.all([localRequest('/api/notion/status'), localRequest('/api/google-places/status'), localRequest('/api/osm-places/status'), localRequest('/api/location/mobile/status'), loadGoogleStatus(), loadPlaceLabels().catch(() => [])]); state.notion.configured = Boolean(notion.configured); state.googlePlaces.configured = Boolean(googlePlaces.configured); state.osmPlaces.configured = Boolean(osmPlaces.configured); state.mobileLocation = { configured: Boolean(mobileLocation.configured), samples: mobileLocation.samples || 0, latest: mobileLocation.latest || '' }; state.placeLabels = placeLabels || state.placeLabels || []; persist(); render(); loadProjects(true).catch(() => {}); loadHabitsToday(true).catch(() => {}); loadHabitHistory(state.habits.range || 'month', true).catch(() => {}); if (googleStatus.connected) loadGoogleCalendar().catch(() => {}); if (mobileLocation.samples) loadLocationData(state.locationView).catch(() => {}); }).catch(() => {});
 loadYoutube(true).catch(() => {});
-if (state.spotify.accessToken) {
-  loadSpotify({ quiet: true }).catch(() => {});
-  startSpotifyPolling();
-}
+loadSpotify({ quiet: true }).catch(error => { state.spotify.error = error.message; state.spotify.errorKind = 'offline'; render(); });
+startSpotifyPolling();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') loadSpotify({ quiet: true }).catch(() => {}); });
 appUpdates.subscribe(updateAppUpdateStatusDisplay);
 appUpdates.init();

@@ -17,8 +17,8 @@
   <key>WorkingDirectory</key>
   <string>__LIFEY_PROJECT_ROOT__</string>
   <key>StandardOutPath</key>
-  <string>/Users/life/Library/Logs/Lifey/lifey.log</string>
+  <string>__LIFEY_LOG_DIR__/lifey.log</string>
   <key>StandardErrorPath</key>
-  <string>/Users/life/Library/Logs/Lifey/lifey-error.log</string>
+  <string>__LIFEY_LOG_DIR__/lifey-error.log</string>
 </dict>
 </plist>

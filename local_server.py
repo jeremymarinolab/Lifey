@@ -16,6 +16,7 @@ import secrets
 import subprocess
 import threading
 import time
+from html import escape as html_escape
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -80,6 +81,7 @@ from project_service import create_project_note, open_project_note, projects_sum
 from routes import ApiError, ApiResponse, RouteRegistry
 from routes import origin_allowed as route_origin_allowed
 from routes import read_json_body, request_allowed as route_request_allowed, validate_json_body
+import spotify_service
 from task_service import insert_task_under_tasks, target_note_for_new_task
 
 ROOT = Path(__file__).resolve().parent
@@ -345,6 +347,10 @@ def build_api_routes() -> RouteRegistry:
         ("/api/google/auth/callback", "google"),
         ("/api/google/calendar/today", "google"),
         ("/api/google/gmail/suggestions", "google"),
+        ("/api/spotify/status", "spotify"),
+        ("/api/spotify/summary", "spotify"),
+        ("/api/spotify/auth/start", "spotify"),
+        ("/api/spotify/auth/callback", "spotify"),
         ("/api/notion/status", "notion"),
         ("/api/traccar/status", "location"),
         ("/api/location/mobile/status", "location"),
@@ -364,7 +370,7 @@ def build_api_routes() -> RouteRegistry:
         ("/api/activity/youtube/today", "activity"),
         ("/api/activity/youtube/week", "activity"),
     ]:
-        routes.add("GET", path, group, "handle_get_api_route")
+        routes.add("GET", path, group, "handle_get_api_route", auth_required=path != "/api/spotify/auth/callback")
     for path, group in [
         ("/api/location/mobile/setup", "location"),
         ("/api/location/mobile/ingest", "location"),
@@ -380,6 +386,11 @@ def build_api_routes() -> RouteRegistry:
         ("/api/google/calendar/event", "google"),
         ("/api/google/calendar/event/update", "google"),
         ("/api/google/calendar/event/delete", "google"),
+        ("/api/spotify/config", "spotify"),
+        ("/api/spotify/sync", "spotify"),
+        ("/api/spotify/disconnect", "spotify"),
+        ("/api/spotify/history/import", "spotify"),
+        ("/api/spotify/history/clear", "spotify"),
         ("/api/obsidian/archive", "archive"),
         ("/api/archive-template", "archive"),
         ("/api/location-archive-templates", "archive"),
@@ -470,6 +481,8 @@ class Handler(SimpleHTTPRequestHandler):
             return self.route_error("Invalid request.", HTTPStatus.BAD_REQUEST)
         except ApiError as error:
             return self.route_error(error.message, error.status)
+        except spotify_service.SpotifyError as error:
+            return self.route_error(str(error), error.status)
         except (OSError, FileNotFoundError, ValueError) as error:
             return self.route_error(str(error), HTTPStatus.BAD_REQUEST)
 
@@ -477,7 +490,7 @@ class Handler(SimpleHTTPRequestHandler):
         return route_origin_allowed(origin, self.headers.get("Host", ""), path)
 
     def request_allowed(self, path: str = "") -> bool:
-        return route_request_allowed(self.headers, self.client_address, path)
+        return route_request_allowed(self.headers, self.client_address, path, getattr(self, "command", "GET"))
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -502,6 +515,26 @@ class Handler(SimpleHTTPRequestHandler):
             return self.json(profile_export_bundle())
         if path == "/api/google/status":
             return self.json(google_oauth_status())
+        if path == "/api/spotify/status":
+            return self.json(spotify_service.status())
+        if path == "/api/spotify/summary":
+            params = parse_qs(parsed.query)
+            return self.json(spotify_service.summary(params.get("range", ["today"])[0], params.get("active", ["0"])[0] == "1"))
+        if path == "/api/spotify/auth/start":
+            self.send_response(HTTPStatus.FOUND)
+            self.send_header("Location", spotify_service.auth_url(self.headers.get("Host", "")))
+            self.end_headers()
+            return
+        if path == "/api/spotify/auth/callback":
+            try:
+                origin = spotify_service.finish_auth(parse_qs(parsed.query), self.headers.get("Host", ""))
+                self.send_response(HTTPStatus.FOUND)
+                self.send_header("Location", origin + "/?spotify=connected")
+                self.end_headers()
+                return
+            except spotify_service.SpotifyError as error:
+                message = html_escape(str(error))
+                return self.html(f"<!doctype html><title>Spotify connection failed</title><body style='font-family:system-ui;background:#2F383E;color:white;padding:32px'><h1>Spotify connection failed</h1><p>{message}</p><p><a style='color:#ff907d' href='/'>Back to Lifey</a></p></body>", error.status)
         if path == "/api/google/auth/start":
             try:
                 if self.client_address[0] not in {"127.0.0.1", "::1"}:
@@ -664,6 +697,19 @@ class Handler(SimpleHTTPRequestHandler):
                 clean = {key: strip_profile_secrets(preferences[key]) for key in PROFILE_PREFERENCE_FIELDS if key in preferences}
                 save_config({"profilePreferences": clean})
                 return self.json({"saved": True, "preferences": clean})
+            if path == "/api/spotify/config":
+                return self.json(spotify_service.configure(str(body.get("clientId", ""))))
+            if path == "/api/spotify/sync":
+                return self.json(spotify_service.sync_recent(force=True))
+            if path == "/api/spotify/disconnect":
+                return self.json(spotify_service.disconnect())
+            if path == "/api/spotify/history/import":
+                plays = body.get("plays", [])
+                if any(not isinstance(play, dict) for play in plays):
+                    return self.json({"error": "Invalid Spotify history."}, HTTPStatus.BAD_REQUEST)
+                return self.json(spotify_service.import_legacy(plays))
+            if path == "/api/spotify/history/clear":
+                return self.json(spotify_service.clear_history())
             if path == "/api/profile/import":
                 updates = clean_profile_import(body)
                 save_config(updates)
@@ -940,12 +986,15 @@ class Handler(SimpleHTTPRequestHandler):
                 return self.json({"id": page["id"], "url": page.get("url", "")})
         except json.JSONDecodeError:
             return self.json({"error": "Invalid request."}, HTTPStatus.BAD_REQUEST)
+        except spotify_service.SpotifyError as error:
+            return self.json({"error": str(error)}, error.status)
         except (OSError, FileNotFoundError, ValueError) as error:
             return self.json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
         return self.json({"error": "Not found."}, HTTPStatus.NOT_FOUND)
 
 
 if __name__ == "__main__":
+    spotify_service.start_worker()
     lan_enabled = os.environ.get("LIFEY_LAN", "").lower() in {"1", "true", "yes"}
     port = int(os.environ.get("LIFEY_PORT", "4173"))
     local_host = "0.0.0.0" if lan_enabled else "127.0.0.1"

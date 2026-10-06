@@ -6,6 +6,11 @@ export PATH="/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_DIR="$HOME/Library/Logs/Lifey"
 mkdir -p "$LOG_DIR"
+PUBLIC_ORIGIN_FILE="$HOME/Library/Application Support/Lifey/public-origin"
+if [[ -z "${LIFEY_PUBLIC_ORIGIN:-}" && -r "$PUBLIC_ORIGIN_FILE" ]]; then
+  IFS= read -r LIFEY_PUBLIC_ORIGIN < "$PUBLIC_ORIGIN_FILE"
+  export LIFEY_PUBLIC_ORIGIN
+fi
 
 # Tailscale is optional now. Lifey starts on the local network by default.
 # Set LIFEY_START_TAILSCALE=1 in the launch agent only if you want the
@@ -35,5 +40,8 @@ fi
 ) >> "$LOG_DIR/traccar-startup.log" 2>&1 &
 
 cd "$ROOT"
-NPM="$(command -v npm)"
-exec "$NPM" run start:lan
+if command -v npm >/dev/null 2>&1; then
+  exec npm run start:lan
+fi
+export LIFEY_LAN=1
+exec python3 local_server.py

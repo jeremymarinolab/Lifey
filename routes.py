@@ -6,6 +6,8 @@ from http import HTTPStatus
 from typing import Any, Callable
 from urllib.parse import urlparse
 
+from config_store import public_origin_setting
+
 
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost"}
 EXTENSION_ORIGIN_SCHEMES = {"chrome-extension", "moz-extension", "safari-web-extension"}
@@ -165,6 +167,10 @@ def validate_json_body(path: str, body: dict) -> None:
         string_field(body, "dailyNotesPath", required=True)
     elif path == "/api/profile/preferences":
         dict_field(body, "preferences", required=True)
+    elif path == "/api/spotify/config":
+        string_field(body, "clientId", required=True, max_length=200)
+    elif path == "/api/spotify/history/import":
+        list_field(body, "plays", required=True, max_length=1000)
     elif path == "/api/projects/create":
         string_field(body, "slug", max_length=200)
         string_field(body, "title", max_length=300)
@@ -254,19 +260,27 @@ def origin_allowed(origin: str, host_header: str, path: str = "") -> bool:
         return path in EXTENSION_API_PATHS
     if parsed_origin.scheme not in {"http", "https"} or not parsed_origin.hostname:
         return False
-    raw_host = host_header.lower()
-    host = raw_host[1:].split("]", 1)[0] if raw_host.startswith("[") else raw_host.split(":", 1)[0]
+    public = public_origin_setting()
+    if public and host_header.lower() == urlparse(public).netloc.lower():
+        return parsed_origin.scheme == "https" and parsed_origin.netloc.lower() == urlparse(public).netloc.lower()
+    parsed_host = urlparse("//" + host_header)
+    if parsed_origin.scheme != "http" or parsed_origin.port != parsed_host.port:
+        return False
     origin_host = parsed_origin.hostname.lower()
+    host = (parsed_host.hostname or "").lower()
     return origin_host == host or (origin_host in LOCAL_HOSTS and host in LOCAL_HOSTS)
 
 
-def request_allowed(headers, client_address: tuple[str, int], path: str = "") -> bool:
+def request_allowed(headers, client_address: tuple[str, int], path: str = "", method: str = "GET") -> bool:
     origin = headers.get("Origin", "")
     if origin:
         return origin_allowed(origin, headers.get("Host", ""), path)
     referer = headers.get("Referer", "")
     if referer:
         return origin_allowed(referer, headers.get("Host", ""), path)
+    public = public_origin_setting()
+    if public and headers.get("Host", "").lower() == urlparse(public).netloc.lower() and method in {"POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
+        return False
     return client_address[0] in {"127.0.0.1", "::1"}
 
 

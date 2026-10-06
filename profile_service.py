@@ -14,6 +14,7 @@ PROFILE_EXCLUDED_SECRETS = [
     "lifeyLocationToken",
     "googleRefreshToken",
     "googleClientSecret",
+    "spotifyRefreshToken",
     "oauthAccessTokens",
 ]
 

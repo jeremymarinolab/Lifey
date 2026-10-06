@@ -1,29 +1,35 @@
 import { badge, escape } from '../../renderers.js';
 import { emptyState } from '../../ui/components.js';
-import { button, iconButton, segmentedControl } from '../../ui/controls.js';
+import { button, segmentedControl } from '../../ui/controls.js';
 import { SPOTIFY_RANGE_OPTIONS, SPOTIFY_VIEW_OPTIONS, YOUTUBE_VIEW_OPTIONS } from '../../ui/config.js';
 import { durationLabel } from '../location/location.js';
 
-export function renderSpotifySummary({ spotify, spotifyStats, currentTrack }) {
-  const periodStats = spotifyStats(spotify, spotify.range || 'today');
+export function renderSpotifySummary({ spotify, currentTrack }) {
+  const periodStats = spotify.stats || { minutes: 0, playCount: 0, songs: [], artists: [] };
   const minutes = Number(periodStats.minutes || 0);
   const artworkUrl = currentTrack?.artwork || '';
   const artwork = `<div class="spotify-art large ${currentTrack?.isPlaying ? 'is-playing' : ''}"><span class="spotify-vinyl"></span>${artworkUrl ? `<img src="${escape(artworkUrl)}" alt="${escape(currentTrack?.title || 'Spotify album artwork')}" loading="lazy">` : '<div class="album">◒</div>'}</div>`;
-  const rows = (spotify.view === 'songs' ? periodStats.songs : periodStats.artists).map((item, index) => {
+  const rows = (spotify.view === 'songs' ? periodStats.songs || [] : periodStats.artists || []).map((item, index) => {
     const main = spotify.view === 'songs' ? item.title : item.name;
     const meta = spotify.view === 'songs' ? `${item.artist} · ${item.playbacks} playback${item.playbacks === 1 ? '' : 's'} · ${durationLabel(item.minutes * 60)}` : `${durationLabel(item.minutes * 60)} · ${item.playbacks} playback${item.playbacks === 1 ? '' : 's'}`;
     return `<div class="spotify-stat-row"><span>${String(index + 1).padStart(2, '0')}</span>${item.artwork ? `<img src="${escape(item.artwork)}" alt="" loading="lazy">` : '<i>◒</i>'}<p><strong>${escape(main)}</strong><small>${escape(meta)}</small></p></div>`;
   }).join('');
-  const status = spotify.connected ? (spotify.endpointNotes?.length ? 'partial' : 'connected') : 'not connected';
-  const statusKind = spotify.connected ? (spotify.endpointNotes?.length ? 'estimated' : 'captured') : 'manual';
-  const title = spotify.connected ? (minutes ? `${durationLabel(minutes * 60)} ${spotify.range || 'today'}` : 'Listening history') : 'Spotify';
-  const meta = spotify.connected ? `${periodStats.plays.length} captured play${periodStats.plays.length === 1 ? '' : 's'} · local history` : 'Connect Spotify to start local listening history';
-  const trackMeta = currentTrack?.artist || (spotify.connected ? (spotify.nowStatus || 'Play something in Spotify to wake this card up') : 'Current song, top artists, and top songs');
+  const status = spotify.error ? spotify.errorKind === 'expired' ? 'reconnect' : 'needs attention' : spotify.connected ? 'connected' : 'not connected';
+  const statusKind = spotify.error ? 'estimated' : spotify.connected ? 'captured' : 'manual';
+  const title = minutes ? `${durationLabel(minutes * 60)} ${spotify.range || 'today'}` : spotify.connected ? 'Listening history' : 'Spotify';
+  const count = periodStats.playCount || 0;
+  const meta = `${count} captured play${count === 1 ? '' : 's'} · estimated listening time`;
+  const trackMeta = currentTrack?.artist || (spotify.error || (spotify.connected ? 'Nothing playing right now' : 'Connect Spotify to see current playback'));
   const nowTitle = currentTrack?.title || (spotify.connected ? 'Nothing playing right now' : 'Connect Spotify');
   const viewTabs = segmentedControl(SPOTIFY_VIEW_OPTIONS, { className: 'segmented-control media-switch spotify-switch', action: 'set-spotify-view', dataKey: 'view', selectedWhen: item => spotify.view === item.value || (item.value === 'artists' && spotify.view !== 'songs') });
   const rangeTabs = segmentedControl(SPOTIFY_RANGE_OPTIONS, { className: 'segmented-filter spotify-range', action: 'set-spotify-range', dataKey: 'range', selected: spotify.range });
-  const connectPrompt = !spotify.connected ? `<div class="spotify-connect-prompt">${button('Connect Spotify', { action: 'connect-spotify' })}<small>Premium is not required. Lifey stores listening history locally from now on.</small></div>` : '';
-  const body = `<div class="spotify-now-v2">${artwork}<div class="spotify-now-copy"><small>${currentTrack?.isPlaying ? 'Now playing' : 'Spotify'}</small><strong>${escape(nowTitle)}</strong><span>${escape(trackMeta)}</span></div>${iconButton(spotify.connected ? '↻' : '↗', { action: 'connect-spotify', title: spotify.connected ? 'Refresh Spotify' : 'Connect Spotify' })}</div>${connectPrompt}${spotify.connected ? `${viewTabs}${rangeTabs}<div class="spotify-stat-list">${rows || emptyState('No captured Spotify plays for this period yet. Keep Lifey open while listening, or refresh after Spotify has recent plays.', 'muted spotify-empty')}</div>` : ''}${spotify.endpointNotes?.length ? `<p class="spotify-limited">${escape(spotify.nowStatus || 'Some Spotify endpoints are unavailable, but local history still works when playback can be read.')}</p>` : ''}`;
+  const connectPrompt = !spotify.connected ? `<div class="spotify-connect-prompt">${button('Connect Spotify', { action: 'connect-spotify' })}<small>Spotify developer app owners need Premium. Recent plays are saved on this Mac.</small></div>` : '';
+  const syncLabel = spotify.lastSync ? `Last synced ${new Date(spotify.lastSync).toLocaleString()}` : 'No completed plays synced yet';
+  const coverage = spotify.historyGapUnrecoverable ? 'Spotify could not supply a gap between syncs; totals are incomplete.' : spotify.historyGap ? 'A gap between syncs is being recovered; totals may be incomplete.' : spotify.backfillComplete ? 'Spotify has no older plays available through this API.' : spotify.connected ? 'Earlier plays are still being checked; historical totals may be incomplete.' : 'Reconnect to update saved history.';
+  const stale = spotify.connected && spotify.lastSync && Date.now() - new Date(spotify.lastSync).getTime() > 75 * 60_000;
+  const historyView = spotify.connected || count ? `${viewTabs}${rangeTabs}<div class="spotify-stat-list">${rows || emptyState('No completed Spotify plays available for this period.', 'muted spotify-empty')}</div>` : '';
+  const syncNote = spotify.lastSync ? `<p class="spotify-limited">${stale ? 'Sync overdue · ' : ''}${escape(syncLabel)} · ${escape(coverage)}</p>` : '';
+  const body = `<div class="spotify-now-v2">${artwork}<div class="spotify-now-copy"><small>${currentTrack?.isPlaying ? 'Now playing' : currentTrack?.type === 'episode' ? 'Podcast' : 'Spotify'}</small><strong>${escape(nowTitle)}</strong><span>${escape(trackMeta)}</span></div></div>${connectPrompt}${historyView}${syncNote}${spotify.error ? `<p class="spotify-limited" role="status">${escape(spotify.error)}</p>` : ''}`;
   return { minutes, title, meta, status, statusKind, body };
 }
 

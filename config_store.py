@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -8,10 +9,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 LEGACY_CONFIG = ROOT / ".local-dashboard.json"
 CONFIG = Path.home() / "Library" / "Application Support" / "Lifey" / "profile.json"
-SECRET_FIELDS = {"notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleRefreshToken", "googleClientSecret"}
+SECRET_FIELDS = {"notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleRefreshToken", "googleClientSecret", "spotifyRefreshToken"}
 KEYCHAIN_SERVICE = "Lifey"
 PROFILE_PREFERENCE_FIELDS = {"appearance", "visibility", "taskDisplay", "contentDisplay", "heroMetricOrder", "heroMetricVisibility", "cardOrder", "integrations", "habitSettings"}
-PROFILE_SECRET_KEYS = {"token", "accessToken", "refreshToken", "notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleClientSecret", "clientSecret", "password", "secret"}
+PROFILE_SECRET_KEYS = {"token", "accessToken", "refreshToken", "notionToken", "traccarToken", "googlePlacesKey", "lifeyLocationToken", "googleClientSecret", "spotifyRefreshToken", "clientSecret", "password", "secret"}
+
+
+def public_origin_setting() -> str:
+    value = os.environ.get("LIFEY_PUBLIC_ORIGIN", "").strip()
+    if not value:
+        try:
+            value = (CONFIG.parent / "public-origin").read_text().strip()
+        except OSError:
+            pass
+    return value.rstrip("/")
 
 
 def keychain_get(name: str) -> str:
@@ -38,8 +49,8 @@ def keychain_set(name: str, value: str) -> bool:
 
 def keychain_delete(name: str) -> bool:
     try:
-        subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name], capture_output=True, text=True, timeout=3, check=False)
-        return True
+        result = subprocess.run(["security", "delete-generic-password", "-s", KEYCHAIN_SERVICE, "-a", name], capture_output=True, text=True, timeout=3, check=False)
+        return result.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
 
@@ -58,13 +69,15 @@ def config() -> dict:
 
 def save_config(values: dict) -> None:
     migrating_legacy = not CONFIG.exists() and LEGACY_CONFIG.exists()
-    current = config()
+    previous = config()
+    current = dict(previous)
     current.update(values)
     persisted = dict(current)
     for key in SECRET_FIELDS:
         value = str(current.get(key) or "")
         if key in values and not value:
-            keychain_delete(key)
+            if previous.get(key) and not keychain_delete(key):
+                raise ValueError(f"Could not remove {key} from the macOS Keychain. Nothing was saved.")
             persisted.pop(key, None)
         elif value:
             if not keychain_set(key, value):
